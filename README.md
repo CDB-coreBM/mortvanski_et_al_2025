@@ -1,5 +1,6 @@
-# Master-Project-Natasa-Mortvanski
-Master project repository - Natasa Mortvanski (MSc Bioinformatics for Health Sciences 2021/2023) 
+# Repository for the code and figures generated in the article by Mortvanski et al 2025
+
+Based on the original work done by Natasa Mortvanski for her Master project in 2023 (MSc Bioinformatics for Health Sciences 2021/2023) 
 
 This is a repository containing the R project with the following directories: 
 
