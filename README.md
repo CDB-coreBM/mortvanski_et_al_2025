@@ -56,11 +56,6 @@ This is a repository containing the R project with the following directories:
   Contains make_reports.R - this script defines function *report* that makes HTML reports out of Rmd scripts 
     and stores them in 04_reports directory.
 
-* 06_shiny_app: 
-
-  Contains R script (app_new.R) for running Shiny app that compares new sample with healthy donor population from Hospital
-  Clínic, stores the results and provides reviews of patients alpha diversity progress trough time.
-
 * run_all.r:
 
   Script that utilize the make_reports.R function and creates HTML reports for all Rmd files in the project.
