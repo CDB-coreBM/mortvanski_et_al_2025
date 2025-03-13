@@ -1,0 +1,952 @@
+---
+title: "Comparative analysis of microbial diversity of healthy vs disease samples"
+author:
+- name: Natasa Mortvanski
+  affiliation: Universitat Pompeu Fabra
+  email: natasa.mortvanski01@estudiant.upf.edu
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = TRUE)
+```
+
+This document contains analysis of differences in microbial alpha diversity between healthy samples from American Gut Project and samples with diagnosed Inflammatory bowel syndrome (Ulcerative colitis and Crohn's disease) and Clostridium difficile infection, as well as samples after fecal microbiota transplantation. 
+
+The aim of this analysis is to show that there are significant differences between microbiome alpha diversity in healthy and disease samples. Furthermore, we want to show that fecal transplantation improves alpha diversity in short- and long-term. 
+
+Loading libraries:
+
+```{r}
+#install.packages("readr")
+library("readr")
+#install.packages('data.table')
+library(data.table)
+library(stringr)
+#install.packages('ggplot2')
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(plyr)
+library(purrr)
+library(dplyr)
+#install.packages('flextable')
+library(flextable)
+library(tibble)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(ggplotify)
+library(here)
+library(tableone)
+
+#install.packages("table1")
+library(table1)
+```
+
+Load *healthy subsample of AGP* data: 
+
+```{r}
+# Load healthy samples' table
+all_healthy <- read.csv(here("01_tidy_data", "AGP_healthy.csv.gz"), header = TRUE, sep = ",")
+
+all_healthy <- dplyr::select(all_healthy, sample_id, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, pielou_evenness, gini_index, strong, simpson, faith_pd, sex, race, host_age, condition)
+
+names(all_healthy)[names(all_healthy) == 'host_age'] <- 'age'
+
+```
+
+Load *Inflammatory Bowel Disease* data:
+
+```{r}
+IBD <- read.csv(here("01_tidy_data", "IBD.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *Ulcerative colitis* data:
+
+```{r}
+UC <- read.csv(here("01_tidy_data", "UC.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *Longitudinal Chron's disease study* data:
+
+```{r}
+CD <- read.csv(here("01_tidy_data", "CD_2.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *CDI data from NCBI* data
+
+```{r}
+CDI <- read.csv(here("01_tidy_data", "ncbi_CDI.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *Changes following fecal microbial transplantation for recurrent CDI* data:
+
+```{r}
+CDI_FMT <- read.csv(here("01_tidy_data", "CDI_FMT.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *Fecal transplant - CDI with underlying IBD* data:
+
+```{r}
+FMT_IBD_CDI <- read.csv(here("01_tidy_data", "FMT_IBD_CDI.csv.gz"), header = TRUE, sep = ",")
+```
+
+Load *Hospital Clinic's CDI* data
+
+```{r}
+hospital_CDI <- read.csv(here("01_tidy_data", "hosp_CDI.csv.gz"), header = TRUE, sep = ",")
+```
+
+Let's define vector of names of the alpha diversity metrics that are going to be analysed:
+
+```{r}
+metric <- c("chao1", "margalef", "menhinick", "fisher_alpha", "faith_pd", "gini_index", "strong", "pielou_evenness", "shannon_entropy", "simpson") 
+```
+
+## Table 1
+
+The summary of the data contained in all datasets (treating all metrics as not normally distributed):
+```{r}
+all_data <- rbind.fill(all_healthy, IBD, UC, CD, CDI, CDI_FMT, FMT_IBD_CDI)
+  
+all_data <- dplyr::select(all_data, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, gini_index, strong, pielou_evenness, faith_pd, condition)
+
+all_data$condition[all_data$condition=="control"] <- "healthy"
+all_data$condition[all_data$condition=="crohns"] <- "CD"
+all_data$condition[all_data$condition=="Cdif"] <- "CDI"
+all_data <- all_data %>% filter (condition != "Donors")
+
+table_one <- CreateTableOne(data = all_data) 
+print(table_one, nonnormal = metric)
+```
+
+```{r}
+all_data$condition <- as.factor(all_data$condition)
+all_data$condition <- ordered(all_data$condition, levels = c("healthy", "CD", "UC", "CDI", "CDI + CD", "CDI + UC"))
+table1(~ chao1 + margalef + menhinick + fisher_alpha + faith_pd + gini_index + strong + pielou_evenness + shannon_entropy + simpson | condition, data=all_data)
+#table_test <- data.frame(table1(~ chao1 + margalef + menhinick + fisher_alpha + faith_pd + gini_index + strong + pielou_evenness + shannon_entropy + simpson | condition, data=all_data))
+```
+
+
+Let's define function for plotting violin plots that we are going to use in the whole analysis:
+
+```{r}
+plot_violin <- function(df, column){
+  violin <- vector('list', length(metric))
+  
+  for (i in 1:length(metric)){
+    mean_line <- df %>% dplyr::group_by(.data[[column]]) %>% dplyr::summarise(grp_mean=mean(.data[[metric[i]]]))
+    plot_data <- df %>% dplyr::group_by(.data[[column]]) %>% dplyr::mutate(m = mean(.data[[metric[i]]])) 
+  
+    violin[[i]] <- plot_data %>% ggplot(aes(x = .data[[metric[i]]], y = reorder(.data[[column]], -m), color = .data[[column]], fill = .data[[column]])) +
+      geom_violin()+
+      geom_boxplot(width=0.1, color="grey", alpha=0.2) +
+      geom_vline(data = mean_line, aes(xintercept = grp_mean, color = .data[[column]]), linetype = "dashed")+ 
+      xlab(if (metric[i] == "shannon_entropy"){"Shannon entropy (❋)"} else if (metric[i] =="chao1"){"Chao1 (+)"} else if (metric[i] == "menhinick"){"Menhinick (+)"} else if (metric[i] == "margalef"){"Margalef (+)"} else if (metric[i] == "fisher_alpha"){"Fisher alpha (+)"} else if (metric[i] == "simpson"){"Simpson (❋)"} else if (metric[i] == "gini_index"){"Gini index (x)"} else if (metric[i] == "strong"){"Strong dominance (x)"} else if (metric[i] == "pielou_evenness"){"Pielou evenness (x)"} else if (metric[i] == "faith_pd"){"Faith PD (+)"}) +
+      ylab("")+
+      theme(legend.position="none", axis.title.x = element_text(size=10))
+  }
+  return(violin)
+}
+```
+
+Function for doing Mann-Whitney-Wilcoxon test:
+
+```{r}
+do_wilcox_test <- function(df, column){
+  test <- list()
+  
+  for (i in 1:length(metric)){
+    test[[i]] <- pairwise.wilcox.test(df[[metric[i]]], df[[column]], p.adjust.method="none") %>% 
+    broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+    #test[[i]]$p.value <- round(test[[i]]$p.value, digits = 16)
+  }
+  
+  tests <- do.call(what = rbind, args = test)
+  
+  return(tests)
+}
+```
+
+```{r}
+label_fun <- function(x){
+  if (x == "shannon_entropy"){y <- "Shannon entropy (❋)"} else if (x =="chao1"){y <- "Chao1 (+)"} else if (x == "menhinick"){y <- "Menhinick (+)"} else if (x == "margalef"){y <- "Margalef (+)"} else if (x == "fisher_alpha"){y <- "Fisher alpha (+)"} else if (x == "simpson"){y <- "Simpson (❋)"} else if (x == "gini_index"){y <- "Gini index (x)"} else if (x == "strong"){y <- "Strong dominance (x)"} else if (x == "pielou_evenness"){y <- "Pielou evenness (x)"} else if (x == "faith_pd"){y <- "Faith PD (+)"}
+  return(y)
+}
+```
+
+## IBD and UC samples
+
+### Distributions of metrics in disease datasets
+
+```{r}
+table(IBD$condition)
+```
+```{r}
+table(UC$condition)
+```
+
+```{r}
+#merge two datasets
+UC_check <- UC 
+UC_check$condition <- "UC_2"
+IBD_check <-  rbind.fill(IBD, UC_check)
+
+IBD_check$condition <- as.factor(IBD_check$condition)
+
+table(IBD_check$condition)
+nrow(IBD_check)
+```
+```{r}
+violin_IBD_check <- vector('list', length(metric))
+
+# Use violin function
+violin_IBD_check <- plot_violin(IBD_check, "condition")
+
+grid.arrange(violin_IBD_check[[1]], violin_IBD_check[[2]],violin_IBD_check[[3]], violin_IBD_check[[4]],violin_IBD_check[[5]], violin_IBD_check[[6]],violin_IBD_check[[7]], violin_IBD_check[[8]],violin_IBD_check[[9]], violin_IBD_check[[10]], ncol=4, top = textGrob("Distributions of 1) Shannon's index  2) Chao1 3) Menhinick's index \n4) Margalef's index 5) Fisher's index 6) Simpson 7) Gini index 8) Strong's index 9) Pielou's evenness \nand 10) Faith's PD in IBD datasets", gp=gpar(fontsize=10,font=2))) 
+```
+
+### Mann-Whitney-Wilcoxon Test
+
+```{r}
+tests_IBD_check <- list()
+
+tests_IBD_check <- do_wilcox_test(IBD_check, "condition")
+
+table <- tests_IBD_check %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_IBD_check$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(tests_IBD_check$p.value, "fdr"), .after='p.value') %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different conditions")
+
+table
+```
+
+Based on Mann-Whitney-Wilcoxon test, alpha diversity of UC samples from second study and CD are significantly different for Menhinick's index, Fisher's alpha (?), Faith's PD and Strong's evenness. Also UC samples from first and second study are significantly different for Menhinick's index, Faith's PD and Strong's evenness. We can look on these samples as one population of IBD. It seems that UC samples from second study expres lower richness and evenness that the ones (7) from the first study.
+
+## Healthy samples vs IBD samples
+
+```{r}
+#merge two datasets
+healthy_disease <-  rbind.fill(all_healthy, IBD, UC)
+
+healthy_disease$condition <- as.factor(healthy_disease$condition)
+healthy_disease$condition <- relevel(healthy_disease$condition, "healthy")
+
+table(healthy_disease$condition)
+```
+
+Explore differences in distribution shape and mean values of groups with different conditions by ploting violin plot.
+
+```{r}
+violin_IBD <- vector('list', length(metric))
+
+# Use violin function
+violin_IBD <- plot_violin(healthy_disease, "condition")
+
+grid.arrange(violin_IBD[[1]], violin_IBD[[2]],violin_IBD[[3]], violin_IBD[[4]],violin_IBD[[5]], violin_IBD[[6]],violin_IBD[[7]], violin_IBD[[8]],violin_IBD[[9]], violin_IBD[[10]], ncol=4) 
+```
+
+### Mann-Whitney-Wilcoxon Test
+
+Test whether different conditions separate into distinct distributions with Mann-Whitney-Wilcoxon test:
+
+```{r}
+tests_IBD <- list()
+
+tests_IBD <- do_wilcox_test(healthy_disease, "condition")
+
+table1 <- tests_IBD %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_IBD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(tests_IBD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1=="CD") %>%
+  filter(group2=="healthy") %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different conditions")
+
+table2 <- tests_IBD %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_IBD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(tests_IBD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1=="UC") %>%
+  filter(group2=="healthy") %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different conditions")
+
+
+table1
+
+library(writexl)
+CD_table <- tests_IBD %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_IBD$p.value, "fdr"), digits=16), .after='p.value') %>%ç
+  add_column(p.adjusted = p.adjust(tests_IBD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1=="CD") %>%
+  filter(group2=="healthy") 
+write_xlsx(CD_table, here("03_plots_and_tables", "CD_AGP_table.xlsx"))
+```
+
+There is significant difference between healthy samples and CD samples in regard to Faith PD, Gini index, Chao1, Margalef's index and Fisher alpha. No significant difference was detected for Pielou evenness, Menhinick, Strong, Shannon entropy and Simpson's index.
+
+```{r}
+table2
+
+UC_table<- tests_IBD %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_IBD$p.value, "fdr"), digits=5), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(tests_IBD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1=="UC") %>%
+  filter(group2=="healthy")
+write_xlsx(UC_table, here("03_plots_and_tables", "UC_AGP_table.xlsx"))
+
+```
+
+It seems like there is significant difference between healthy samples and UC samples in all alpha metrics except from Shannon entropy, Strong's evennes, Simpsons index and Pielou evenness (almost all of the "evenness" metrics except from Gini). "Richness" indices are all signifficantly different.
+
+
+Now lets see which parameters show significant difference between healthy and all IBD samples:
+
+```{r}
+wilcox_healthy_disease <- healthy_disease %>%
+  summarise(Chao1 = wilcox.test(chao1[condition == "healthy"], chao1[condition != "healthy"])$p.value,
+            Margalef = wilcox.test(margalef[condition == "healthy"], margalef[condition != "healthy"])$p.value,
+            Menhinick = wilcox.test(menhinick[condition == "healthy"], menhinick[condition != "healthy"])$p.value,
+            Fisher = wilcox.test(fisher_alpha[condition == "healthy"], fisher_alpha[condition != "healthy"])$p.value,
+            Faith = wilcox.test(faith_pd[condition == "healthy"], faith_pd[condition != "healthy"])$p.value,
+            Gini = wilcox.test(gini_index[condition == "healthy"], gini_index[condition != "healthy"])$p.value,
+            Strong = wilcox.test(strong[condition == "healthy"], strong[condition != "healthy"])$p.value,
+            Pielou = wilcox.test(pielou_evenness[condition == "healthy"], pielou_evenness[condition != "healthy"])$p.value,
+            Shannon = wilcox.test(shannon_entropy[condition == "healthy"], shannon_entropy[condition != "healthy"])$p.value,
+            Sipson = wilcox.test(simpson[condition == "healthy"], simpson[condition != "healthy"])$p.value) 
+
+wilcox_healthy_disease <- t(wilcox_healthy_disease)
+colnames(wilcox_healthy_disease) <- c("p.value")
+wilcox_healthy_disease <- data.frame(alpha_metric = row.names(wilcox_healthy_disease), wilcox_healthy_disease)
+wilcox_healthy_disease$p.value <- round(wilcox_healthy_disease$p.value, digits = 5)
+
+wilcox_healthy_disease %>%
+  add_column(p.adjusted = round(p.adjust(wilcox_healthy_disease$p.value, "fdr"), digits = 5), .after='p.value') %>%
+  arrange(p.value)  %>%
+  flextable() %>%
+  bold(~ p.value < 0.05, 2) %>%
+  bold(~ p.adjusted < 0.05, 3) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of alpha diversity indices between healthy and IBD samples")
+```
+
+There is significant difference between healthy samples and those that are not healthy in all alpha metrics except from Pielou evenness, Simpson's index and Strong's evenness.
+
+### Kruskal-Wallis Test
+
+Kruskal-Wallis Testis a non-parametric method for testing whether samples originate from the same distribution. It is used for comparing two or more independent samples of equal or different sample sizes. It extends the Mann–Whitney U test, which is used for comparing only two groups (source: Wikipedia)
+
+```{r}
+kruskal_results <- healthy_disease %>%
+  summarise(Chao1 = kruskal.test(healthy_disease$chao1 ~ healthy_disease$condition)$p.value,
+            Margalef = kruskal.test(healthy_disease$margalef ~ healthy_disease$condition)$p.value,
+            Menhinick = kruskal.test(healthy_disease$menhinick ~ healthy_disease$condition)$p.value,
+            Fisher = kruskal.test(healthy_disease$fisher_alpha ~ healthy_disease$condition)$p.value,
+            Faith = kruskal.test(healthy_disease$faith_pd ~ healthy_disease$condition)$p.value,
+            Gini = kruskal.test(healthy_disease$gini_index ~ healthy_disease$condition)$p.value,
+            Strong = kruskal.test(healthy_disease$strong ~ healthy_disease$condition)$p.value,
+            Pielou = kruskal.test(healthy_disease$pielou_evenness ~ healthy_disease$condition)$p.value,
+            Shannon = kruskal.test(healthy_disease$shannon_entropy ~ healthy_disease$condition)$p.value,
+            Sipson = kruskal.test(healthy_disease$simpson ~ healthy_disease$condition)$p.value)
+
+kruskal_results_df <- as.data.frame(t(kruskal_results))
+colnames(kruskal_results_df) <- c("p.value")
+kruskal_results_df <- data.frame(alpha_metric = row.names(kruskal_results_df), kruskal_results_df)
+kruskal_results_df$p.value <- round(kruskal_results_df$p.value, digits = 5)
+
+
+kruskal_results_df %>% 
+  add_column(p.adjusted = round(p.adjust(kruskal_results_df$p.value, "fdr"), digits = 5), .after='p.value') %>%
+  arrange(p.value)  %>%
+  flextable() %>%
+  bold(~ p.value < 0.05, 2) %>%
+   bold(~ p.adjusted < 0.05, 3) %>%
+  add_header_lines(values = "Results of the Kruskal-Wallis test for differentiation of alpha diversity indices across different conditions")
+
+```
+
+
+Kruskal-Wallis test shows similar results as Mann-Withney-Wilcoxon test, except that in this test Shannon entropy is also not significantly different in healthy vs unhealthy comparison. The downside of this analysis is the small sample size of IBD dataset (UC and CD). 
+
+## Longitudinal Chron's disease analysis
+
+Since previous analysis consisted from small sample size for IBD dataset and Chron's disease samples showed unexpectedly high alpha diversity in various indexes, lets incorporate another study, this time only with CD patients. The sample size of this data set is `r nrow(CD)`. The number of patients and controls is balanced and controls are close relatives of patients. Each patient was sampled multiple times during the period of 6 weeks. Some patients previously underwent a surgical intervention on some part of their digestive system.
+
+```{r}
+table(CD$description, CD$condition)
+
+table(CD$condition)
+
+table(CD$surgery_and_ibd)
+```
+
+### Distribution and mean differences between conditions
+
+Lets do Violin plot to see the difference in alpha diversity between cases and controls in this study: 
+
+```{r}
+violin_CDa <- vector('list', length(metric))
+
+# Use violin function
+violin_CDa <- plot_violin(CD, "condition")
+
+grid.arrange(violin_CDa[[1]], violin_CDa[[2]], violin_CDa[[3]], violin_CDa[[4]], violin_CDa[[5]], violin_CDa[[6]], violin_CDa[[7]],  violin_CDa[[9]], violin_CDa[[10]], ncol=4, top = textGrob("Distributions of 1) Shannon's index  2) Chao1 3) Menhinick's index \n4) Margalef's index 5) Fisher's index 6) Simpson 7) Gini index 8) Strong's index 9) Pielou's evenness \nand 10) Faith's PD in longitudinal CD datasets", gp=gpar(fontsize=10,font=2))) 
+```
+
+Lets now compare alpha diversity between cases and controls but taking into account if they underwent surgery: 
+
+```{r}
+violin_CDb <- vector('list', length(metric))
+
+# Use violin function
+violin_CDb <- plot_violin(CD, "surgery_and_ibd")
+
+#violin_CDb
+
+grid.arrange(violin_CDb[[1]], violin_CDb[[2]], violin_CDb[[3]], violin_CDb[[4]], violin_CDb[[5]], violin_CDb[[6]], violin_CDb[[7]], violin_CDb[[8]], violin_CDb[[9]], violin_CDb[[10]], ncol=3) 
+```
+
+
+Lets plot differences in effect of different surgical interventions:
+
+```{r}
+violin_CD_surg <- vector('list', length(metric))
+
+# Use violin function
+violin_CD_surg <- plot_violin(CD, "surgery_type")
+
+violin_CD_surg
+```
+
+Finally, lets compare cases and control from this study with cases from previous IBD studies and AGP controls:
+
+```{r}
+CD_1 <- healthy_disease[healthy_disease$condition != "UC",]
+
+CD_surg <- CD
+CD_surg$condition <- NULL
+names(CD_surg)[names(CD_surg) == 'surgery_and_ibd'] <- 'condition'
+
+CD_check <- rbind.fill(CD_1, CD_surg)
+
+CD_check$condition[CD_check$condition == "CD"] <-'CD_1'
+CD_check$condition[CD_check$condition == "crohns"] <-'CD_2'
+CD_check$condition[CD_check$condition == "crohns (surgery)"] <-'CD_surgery'
+CD_check$condition[CD_check$condition == "healthy"] <-'control(AGP)'
+CD_check$condition[CD_check$condition == "control"] <-'control_2'
+```
+
+```{r}
+violin_CD_check <- vector('list', length(metric))
+
+# Use violin function
+violin_CD_check <- plot_violin(CD_check, "condition")
+
+violin_CD_check
+```
+
+Here we can see that alpha diversity of CD samples from previous data set have similar mean values as CD samples for all alpha indexes except from Faith's PD which is much higher and Gini index which is much lower than in this longitudinal study. On the other side, CD samples with past surgery had much lower mean in all measures. 
+
+This probably mean that high diversity of CD samples is not a mistake, those are probably just samples with better clinical status. 
+
+When it comes to samples with previous surgery, it is unclear whether the lower alpha diversity comes from the severity of CD symptoms or as a direct consequence of surgery (no info about the time that passed after surgery).
+
+```{r}
+test_CD_1 <- list()
+test_CD <- list()
+
+test_CD_1 <- do_wilcox_test(CD_1, "condition")
+test_CD <- do_wilcox_test(CD, "surgery_and_ibd")
+
+table_CD_1 <- test_CD_1 %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD_1$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD_1$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value, parameter)  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Crohns vs controls in CD_1 dataset")
+
+table_CD_2 <- test_CD %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1 == "crohns")  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Crohns vs controls in CD dataset")
+
+table_CD_3 <- test_CD %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1 != "crohns" & group2 == "control")  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Crohns (surgery) vs controls in CD dataset")
+```
+
+Results of the Mann-Whitney-Wilcoxon test for diversity distributions of healthy and CD samples in first study:
+
+```{r}
+table_CD_1
+
+long_CD_table <- test_CD %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD$p.value, "fdr"),  .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1 == "crohns")
+write_xlsx(long_CD_table, here("03_plots_and_tables", "long_CD_table.xlsx"))
+```
+
+This table shows that, in first study, half of the indices don't show significant difference between healthy and CD samples (Pielou, Menhinick, Strong, Shannon and Simpson).
+
+Results of the Mann-Whitney-Wilcoxon test for diversity distributions of healthy and CD samples in second (longitudinal) study:
+
+```{r}
+table_CD_2
+
+long_CD_table <- test_CD %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1 == "crohns")
+write_xlsx(long_CD_table, here("03_plots_and_tables", "long_CD_table.xlsx"))
+```
+
+Helathy and CD samples without surgery are different in all except three alpha diversity indices: Margalef, Menhinick and Fisher alpha.
+
+```{r}
+table_CD_3
+
+long_CD_surg_table <- test_CD %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD$p.value, "fdr"),  .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1 != "crohns" & group2 == "control")
+write_xlsx(long_CD_surg_table, here("03_plots_and_tables", "long_CD_surg_table.xlsx"))
+```
+
+All metrics show significant difference between healthy and Crohn's samples that undergone some type of surgical procedure.
+
+```{r}
+CD_check_w <- CD_check %>% filter(CD_check$condition != "control(AGP)" & CD_check$condition != "control_2" )
+
+test_CD_3 <- list()
+
+test_CD_3 <- do_wilcox_test(CD_check_w, "condition")
+
+table_CD_3 <- test_CD_3 %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD_3$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD_3$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value, parameter)  %>%
+  filter(group1 != "CD_surgery") 
+
+table_CD_3%>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different groups of Crhohn's disease patients")
+
+write_xlsx(table_CD_3, here("03_plots_and_tables", "long_CD_vs_CD1_table.xlsx"))
+```
+
+```{r}
+test_CD_check <- list()
+
+test_CD_check <- do_wilcox_test(CD_check, "condition")
+
+AGP_control_long_table <- test_CD_check %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CD_check$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CD_check$p.value, "fdr"),  .after='p.value') %>%
+  filter(group1 == "control(AGP)" & group2 == "control_2") %>%
+  arrange(p.value, parameter)  
+
+AGP_control_long_table%>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "AGP vs controls in CD_2 dataset")
+
+write_xlsx(AGP_control_long_table, here("03_plots_and_tables", "AGP_control_long_table.xlsx"))
+
+```
+
+This table confirms that CD samples (without surgery) from two studies significantly differ in all except from Simpson, Fisher and Shannon index. Also healthy controls from longitudinal study are significantly different from AGP healthy population in all metrics except Pielou, Simpson and Shannon index. This tells us that we probably shouldn't mix these datasets since they show different trends. The reason is probably the heterogeneity of IBD conditions and severity level which is not properly annotated.
+
+Now, lets merge all data sets with IBD and AGP as control:
+
+```{r}
+CD_merge <- CD %>%
+  filter(condition != "not applicable")
+
+CD_merge$condition[CD_merge$condition=="control"] <- "healthy"
+CD_merge$condition[CD_merge$condition=="crohns"] <- "CD"
+
+# healthy_disease_2 <- rbind.fill(healthy_disease, before_trans, CD_merge)
+healthy_disease_2 <- rbind.fill(all_healthy, IBD, UC, CD_merge)
+
+# Sizes of each dataset
+table(healthy_disease_2$condition)
+```
+
+```{r}
+# Do Mann-Whitney-Wilcoxon test to see which parameters show significant differenc between healthy and unhealthy samples
+wilcox_p_value <- healthy_disease_2 %>%
+  summarise(Shannon = wilcox.test(shannon_entropy[condition == "healthy"], shannon_entropy[condition != "healthy"])$p.value,
+            Chao1 = wilcox.test(chao1[condition == "healthy"], chao1[condition != "healthy"])$p.value,
+            Menhinick = wilcox.test(menhinick[condition == "healthy"], menhinick[condition != "healthy"])$p.value,
+            Margalef = wilcox.test(margalef[condition == "healthy"], margalef[condition != "healthy"])$p.value,
+            Simpson = wilcox.test(simpson[condition == "healthy"], simpson[condition != "healthy"])$p.value,
+            Fisher = wilcox.test(fisher_alpha[condition == "healthy"], fisher_alpha[condition != "healthy"])$p.value,
+            Pielou = wilcox.test(pielou_evenness[condition == "healthy"], pielou_evenness[condition != "healthy"])$p.value,
+            Gini = wilcox.test(gini_index[condition == "healthy"], gini_index[condition != "healthy"])$p.value,
+            Strong = wilcox.test(strong[condition == "healthy"], strong[condition != "healthy"])$p.value,
+            Faith = wilcox.test(faith_pd[condition == "healthy"], faith_pd[condition != "healthy"])$p.value) 
+
+wilcox_p_value <- t(wilcox_p_value)
+colnames(wilcox_p_value) <- c("p.value")
+wilcox_p_value <- data.frame(Alpha_Metric = row.names(wilcox_p_value), wilcox_p_value)
+# wilcox_p_value$p.value <- round(wilcox_p_value$p.value, digits = 16)
+
+wilcox_p_value %>%
+  #add_column(p.adjusted = round(p.adjust(wilcox_p_value$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(wilcox_p_value$p.value, "fdr"), .after='p.value') %>%
+  flextable() %>%
+  bold(~ p.value < 0.05, 2) %>%
+  bold(~ p.adjusted < 0.05, 3) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different parameters between healthy and unhealthy samples")
+```
+
+### Kruskal-Wallis test
+
+```{r}
+kruskal_results <- healthy_disease_2 %>%
+  summarise(Shannon = kruskal.test(healthy_disease_2$shannon_entropy ~ healthy_disease_2$condition)$p.value,
+  Chao1 = kruskal.test(healthy_disease_2$chao1 ~ healthy_disease_2$condition)$p.value,
+  Fisher = kruskal.test(healthy_disease_2$fisher_alpha ~ healthy_disease_2$condition)$p.value,
+  Margalef =kruskal.test(healthy_disease_2$margalef ~ healthy_disease_2$condition)$p.value,
+  Simpson = kruskal.test(healthy_disease_2$simpson ~ healthy_disease_2$condition)$p.value,
+  Menhinick = kruskal.test(healthy_disease_2$menhinick ~ healthy_disease_2$condition)$p.value,
+  Pielou = kruskal.test(healthy_disease_2$pielou_evenness ~ healthy_disease_2$condition)$p.value,
+  Gini = kruskal.test(healthy_disease_2$gini_index ~ healthy_disease_2$condition)$p.value,
+  Strong = kruskal.test(healthy_disease_2$strong ~ healthy_disease_2$condition)$p.value,
+  Faith = kruskal.test(healthy_disease_2$faith_pd ~ healthy_disease_2$condition)$p.value)
+
+kruskal_results <- as.data.frame(t(kruskal_results))
+colnames(kruskal_results) <- c("p.value")
+kruskal_results <- data.frame(Alpha_Metric = row.names(kruskal_results), kruskal_results)
+#kruskal_results$p.value <- round(kruskal_results$p.value, digits = 16)
+
+kruskal_results %>% 
+  add_column(p.adjusted = round(p.adjust(kruskal_results$p.value, "fdr"), digits=16), .after='p.value') %>%
+  flextable() %>%
+  bold(~ p.value < 0.05, 2) %>%
+   bold(~ p.adjusted < 0.05, 3) %>%
+  add_header_lines(values = "Results of the Kruskal-Wallis test for differentiation of different parameters across different conditions")
+
+```
+
+As expected, if we mix data sets the results show significant difference between healthy and unhealthy samples for all metrics. However, this conclusion can be due to the heterogeniety of data. 
+
+## CDI data
+
+Let's see how Clostridium difficile infection affects the alpha diversity of gut microbiome:
+
+```{r}
+table(CDI$PPI_use)
+table(CDI$prior_antibiotics)
+table(CDI$response_to_treatment)
+table(CDI$recurrence)
+table(CDI$severe_CDI)
+```
+
+```{r}
+#install.packages("expss")
+library(expss)
+
+cross_cases(CDI, severe_CDI, prior_antibiotics)
+cross_cases(CDI, severe_CDI, response_to_treatment)
+cross_cases(CDI, severe_CDI, recurrence)
+cross_cases(CDI, response_to_treatment, recurrence)
+```
+
+Check whether increased BMI affects the alpha diversity score:
+
+```{r}
+CDI$condition <- "CDI"
+
+for (i in 1:nrow(CDI)){
+  if (CDI$BMI[i] < 25){
+    CDI$BMI_cat[i] <- "normal"
+  } else {
+    CDI$BMI_cat[i] <- "obese"
+  } 
+}
+
+table(CDI$BMI_cat)
+```
+
+More than half samples have BMI over 25 which classifies them in obese group. However, lets chech whether there is significant difference in alpha diversity regarding the BMI cathegory:
+
+```{r}
+violin_CDI_BMI <- vector('list', length(metric))
+
+# Use violin function
+violin_CDI_BMI <- plot_violin(CDI, "BMI_cat")
+
+#violin_CDb
+
+grid.arrange(violin_CDI_BMI[[1]], violin_CDI_BMI[[2]], violin_CDI_BMI[[3]], violin_CDI_BMI[[4]], violin_CDI_BMI[[5]], violin_CDI_BMI[[6]], violin_CDI_BMI[[7]], violin_CDI_BMI[[8]], violin_CDI_BMI[[9]], violin_CDI_BMI[[10]], ncol=3) 
+```
+
+```{r}
+test_CDI_BMI <- list()
+
+test_CDI_BMI <- do_wilcox_test(CDI, "BMI_cat")
+
+test_CDI_BMI <- test_CDI_BMI %>% 
+  #add_column(p.adjusted = round(p.adjust(test_CDI_BMI$p.value, "fdr"), digits=5), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CDI_BMI$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value, parameter)  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for...")
+
+test_CDI_BMI
+```
+
+Obese and normal samples do not diverge significantly in alpha diversity, so there is no need to discard more than half of the samples due to their increased BMI. 
+Now lets compare CDI samples with AGP control:
+
+```{r}
+CDI_check <- rbind.fill(CDI, all_healthy)
+
+violin_CDI_healthy <- vector('list', length(metric))
+
+# Use violin function
+violin_CDI_healthy <- plot_violin(CDI_check, "condition")
+
+#violin_CDb
+
+grid.arrange(violin_CDI_healthy[[1]], violin_CDI_healthy[[2]], violin_CDI_healthy[[3]], violin_CDI_healthy[[4]], violin_CDI_healthy[[5]], violin_CDI_healthy[[6]], violin_CDI_healthy[[7]], violin_CDI_healthy[[8]], violin_CDI_healthy[[9]], violin_CDI_healthy[[10]], ncol=3) 
+```
+
+```{r}
+test_CDI_healthy <- list()
+
+test_CDI_healthy <- do_wilcox_test(CDI_check, "condition")
+
+test_CDI_healthy <- test_CDI_healthy %>% 
+  # add_column(p.adjusted = round(p.adjust(test_CDI_healthy$p.value, "fdr"), digits=16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(test_CDI_healthy$p.value, "fdr"), .after='p.value') %>%
+  arrange(p.value, parameter)  
+
+test_CDI_healthy %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Mann-Whitney-Wilcoxon test for distributions of different groups of Crhohn's disease patients")
+
+write_xlsx(test_CDI_healthy, here("03_plots_and_tables", "CDI_AGP.xlsx"))
+```
+
+Means of all alpha diversity indices of CDI samples are significantly different from means of the healthy control population. Based on violin plots, both richness and evenness indices show lower values in CDI samples.
+
+## Short- and Longterm changes after fecal transplantation for recurrent CDI
+
+With this data set of `r `nrow(CDI_FMT)` samples we will explore whether there FMT for recurrent CDI affects the improvement of alpha diversity. Samples from 4 patients were collected in multiple time points after transplantation
+
+```{r}
+table(CDI_FMT$disease_state)
+table(CDI_FMT$animations_subject)
+
+CDI_FMT$animations_subject[CDI_FMT$animations_subject == "CD1"] <-'subject_1'
+CDI_FMT$animations_subject[CDI_FMT$animations_subject == "CD2"] <-'subject_2'
+CDI_FMT$animations_subject[CDI_FMT$animations_subject == "CD3"] <-'subject_3'
+CDI_FMT$animations_subject[CDI_FMT$animations_subject == "CD4"] <-'subject_4'
+```
+
+```{r}
+progression <- vector('list', length(metric))
+
+for (i in 1:length(metric)){
+  progression[[i]] <- CDI_FMT %>% ggplot(aes(x=day_since_fmt, y= .data[[metric[i]]], color= CDI_FMT$animations_subj)) +
+    geom_line()+
+    geom_point(size=1)+
+    ylab(label_fun(metric[i]))+
+    xlab("Day since FMT")+
+    facet_wrap(dplyr::vars(CDI_FMT$animations_subject), ncol=2)
+}
+
+progression
+```
+
+```{r}
+CDI_FMT_a <- CDI_FMT
+
+for(i in 1:nrow(CDI_FMT_a)) {
+  if(CDI_FMT_a$day_since_fmt[i] < 1 ){
+      CDI_FMT_a$day_since_fmt[i] <- -1
+  }
+}
+  
+for (i in 1:length(metric)) {
+  progression[[i]] <- CDI_FMT_a %>% ggplot(aes(x=day_since_fmt, y= .data[[metric[i]]], color =CDI_FMT$animations_subj)) +
+    geom_line()+
+    geom_point(size=1) +
+    geom_vline(xintercept = 0, linetype = "dashed")+ 
+    theme_classic() +
+    theme(legend.position="none", axis.title.y=element_text(size=10), axis.title.x=element_text(size=15), title =element_text(size=10)) +
+    # ggtitle(label_fun(metric[i]))+
+    # ylab("")+
+    ylab(label_fun(metric[i]))+
+    xlab("")+
+    scale_color_manual(values=c('#a6611a','#dfc27d','#80cdc1','#018571'))
+  }
+
+grid.arrange(progression[[2]], progression[[7]], ncol=1, bottom = textGrob("Day since FMT", gp = gpar(fontsize = 15)))
+
+#png(file = here("03_plots_and_tables", "progress_c.png"), width = 3000, height = 2000, res = 300)
+grid.arrange(progression[[2]], progression[[7]], progression[[9]], ncol=1, bottom = textGrob("Day since FMT", gp = gpar(fontsize = 12)))
+#dev.off()
+
+# grid.arrange(progression[[1]], progression[[2]], progression[[3]], progression[[4]], progression[[5]], progression[[6]], ncol=2)
+# grid.arrange(progression[[7]], progression[[8]], progression[[9]], progression[[10]], ncol=2, nrow=3)
+```
+
+```{r}
+for (i in 1:length(metric)) {
+  progression[[i]] <- CDI_FMT[CDI_FMT$animations_subject == "subject_1",] %>% ggplot(aes(x=day_since_fmt, y= .data[[metric[i]]])) +
+    geom_line(color='#018571')+
+    geom_point(size=1, color='#018571') +
+    theme_classic() +
+    theme(legend.position="none", axis.title.y=element_text(size=12), axis.title.x=element_text(size=12)) +
+    ylab(label_fun(metric[i]))+
+    xlab("")
+    #scale_color_brewer(palette="Set3")
+    #scale_color_manual(values=c('#a6611a','#dfc27d','#80cdc1','#018571'))
+  }
+
+grid.arrange(progression[[2]], progression[[7]], ncol=1)
+grid.arrange(progression[[1]], progression[[2]], progression[[3]], progression[[4]], progression[[5]], progression[[6]], ncol=3)
+grid.arrange(progression[[7]], progression[[8]], progression[[9]], progression[[10]], ncol=3, bottom = textGrob("Day since FMT", gp = gpar(fontsize = 12)))
+```
+
+```{r}
+#all_tables_next <- data.frame(table1(~ t_probability | condition, data=t_test_results, overall=F, render.continuous=c("Mean (Min, Max)"="MEAN (MIN, MAX)")))
+table1(~ chao1 + margalef + menhinick + fisher_alpha + faith_pd + gini_index + strong + pielou_evenness + shannon_entropy + simpson | animations_subject, data=CDI_FMT, overall=F, render.continuous=c("Min"="MIN", "Max"="MAX", "percent. difference" = "((MAX-MIN)/MIN)*100"))
+```
+
+```{r}
+subjects <- unique(CDI_FMT$animations_subject)
+
+data <- CDI_FMT[CDI_FMT$animations_subject == subjects[1],]
+  
+for (i in 1:length(metric)) {
+  progression[[i]] <- data %>% ggplot(aes(x=day_since_fmt, y= .data[[metric[i]]])) +
+    geom_line(color='#a6611a')+
+    geom_point(size=1, color='#a6611a')+
+    ylab(label_fun(metric[i]))+
+    xlab("Day since FMT")+
+    theme_classic() 
+}
+
+grid.arrange(progression[[1]], progression[[2]], progression[[3]], progression[[4]], progression[[5]], progression[[6]], progression[[7]], progression[[8]], progression[[9]], progression[[10]], ncol=3)
+```
+
+
+Even though the value is fluctuating as the time passes, we can see general trend of improvement of alpha diversity after FMT in all subjects.
+
+## Fecal transplant data analysis
+
+From the [paper](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5433077/): "A recent study suggests significantly lower response of CDI to FMT in patients with underlying inflammatory bowel disease (IBD)".
+
+The original study is looking at the changes in community composition (taxonomical) in patients after FMT. Lets examine what happens with alpha diversity as the time is passing after transplantation:
+
+```{r}
+table(FMT_IBD_CDI$condition)
+table(FMT_IBD_CDI$day_since_fmt)
+```
+
+```{r}
+violin_trans_2 <- vector('list', length(metric))
+
+for (i in 1:length(metric)){
+  mean_line <- FMT_IBD_CDI %>% dplyr::group_by(condition, day_since_fmt) %>% dplyr::summarise(grp_mean = mean(.data[[metric[i]]]))
+
+  violin_trans_2[[i]] <- FMT_IBD_CDI %>%  
+    mutate(across(day_since_fmt, factor, levels=c("-1","7","28","NA-Donor"))) %>% 
+    ggplot(aes(x = .data[[metric[i]]], y = day_since_fmt, color = day_since_fmt, fill = day_since_fmt)) +
+    geom_violin()+
+    geom_boxplot(width=0.1, color="grey", alpha=0.2) +
+    geom_vline(data = mean_line, aes(xintercept = grp_mean, color = day_since_fmt), linetype = "dashed")+ 
+    xlab(label_fun(metric[i]))+
+    ylab("") +
+    facet_wrap(dplyr::vars(condition), nrow=1)+
+    theme(legend.position="none") 
+  
+}
+
+#plots for Shannon entropy
+violin_trans_2
+```
+
+These plots show consistent trend of improvement of alpha diversity in 7th and 28th day after fecal microbiota transplantation. For all alpha indexes we can see that the diversity is increasing toward donor's mean value. However, samples with underlying CD show a trend of diversity decrease in 28th day compared to 7th day. This shows that IBD can decrease the efficiency of FMT in CDI recepients.
+
+```{r}
+cond <- c("CDI + UC", "CDI", "CDI + CD")
+test_CDI_trans <- list()
+table <- list()
+
+for (i in 1:length(cond)){
+  FMT_IBD_CDI_1 <- FMT_IBD_CDI %>%
+    filter(condition == cond[i])
+  
+  test_CDI_trans <- do_wilcox_test(FMT_IBD_CDI_1, "day_since_fmt")
+
+  table <- test_CDI_trans %>%
+    # add_column(p.adjusted = round(p.adjust(test_CDI_trans$p.value, "fdr"), digits=5), .after='p.value') %>%
+    add_column(p.adjusted = p.adjust(test_CDI_trans$p.value, "fdr"), .after='p.value') %>%
+    flextable() %>%
+    bold(~ p.value < 0.05, 4) %>%
+    bold(~ p.adjusted < 0.05, 5) %>%
+    add_header_lines(values = paste("Results of the Mann-Whitney-Wilcoxon test for condition:", cond[i], sep = " "))
+   
+ print(table)
+ 
+ test_CDI_trans <- list()
+}
+```
+
+From these three tables we can see that only for CDI patients without underlying IBD show signifficant improvement after FMT.
+
+# Conclusions
+
+Based on previous analysis we can draw following conclusions:
+
+* There is significant difference in alpha diversity between healthy and samples with diagnosed IBD with healthy samples showing higher richness (and lower evenness?) for most of the analysed alpha metrics
+* Fecal microbiota transplantation is followed by increase in most of the analysed alpha diversity 
+* Underlying IBD is decreasing the efficiency of fecal microbiota transplantation 
+
+# Session information
+
+```{r}
+sessionInfo()
+```

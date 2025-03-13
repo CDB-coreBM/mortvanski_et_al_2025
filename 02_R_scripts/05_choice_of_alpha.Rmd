@@ -1,0 +1,1014 @@
+---
+title: "Choice of alpha metric"
+author: "Natasa Mortvanski"
+date: "2023-03-24"
+output: html_document
+---
+
+Here I gathered together all the tests I did on healthy samples and comparisons between healthy and disease samples with the aim of choosing the apropariate representative alpha metrics that are going to be used for final report.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plyr)
+library(cowplot)
+library(tibble)
+library(flextable)
+library(nortest)
+library(corrplot)
+library(PerformanceAnalytics)
+library(RColorBrewer)
+library(here)
+library(ROSE)
+library(randomForest)
+library(caret)
+library(rstatix)
+library(gridExtra)
+library(grid)
+#install.packages("moments")
+library(moments)
+library(writexl)
+```
+
+```{r}
+metric <- c("chao1", "margalef", "menhinick", "fisher_alpha", "faith_pd", "gini_index", "strong", "pielou_evenness", "shannon_entropy", "simpson") 
+```
+
+#Import data
+
+```{r}
+all_healthy <- read.csv(here("01_tidy_data", "AGP_healthy.csv.gz"), header = TRUE, sep = ",")
+IBD <- read.csv(here("01_tidy_data", "IBD.csv.gz"), header = TRUE, sep = ",")
+UC <- read.csv(here("01_tidy_data", "UC.csv.gz"), header = TRUE, sep = ",")
+CD <- read.csv(here("01_tidy_data", "CD_2.csv.gz"), header = TRUE, sep = ",")
+CDI <- read.csv(here("01_tidy_data", "ncbi_CDI.csv.gz"), header = TRUE, sep = ",")
+hospital_CDI <- read.csv(here("01_tidy_data", "hosp_CDI.csv.gz"), header = TRUE, sep = ",")
+hospital_donor <- read.csv(here("01_tidy_data", "hosp_donor.csv.gz"), header = TRUE, sep = ",")
+
+all_healthy <- dplyr::select(all_healthy, sample_id, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, pielou_evenness, gini_index, strong, simpson, faith_pd, condition)
+
+CD_merge <- CD %>%
+  filter(condition != "not applicable")
+
+CD_merge$condition[CD_merge$condition=="control"] <- "healthy"
+CD_merge$condition[CD_merge$condition=="crohns"] <- "CD"
+```
+
+Dataset combining all datasets:
+
+```{r}
+healthy_disease <- rbind.fill(all_healthy, IBD, UC, CD_merge, CDI)
+
+# extract only allpha metrics and condition columns
+healthy_disease <- dplyr::select(healthy_disease, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, gini_index, strong, pielou_evenness, faith_pd, condition)
+
+# for random forest
+healthy_disease$healthy_or_not[healthy_disease$condition == "healthy"] <- "healthy"
+healthy_disease$healthy_or_not[healthy_disease$condition != "healthy"] <- "unhealthy"
+
+healthy_disease$healthy_or_not<- as.factor(healthy_disease$healthy_or_not)
+healthy_disease$condition<- as.factor(healthy_disease$condition)
+
+table(healthy_disease$condition)
+table(healthy_disease$healthy_or_not)
+```
+
+Dataset combining healthy samples and IBD samples:
+
+```{r}
+healthy_IBD <- rbind.fill(all_healthy, IBD, UC, CD_merge)
+
+# extract only allpha metrics and condition columns
+healthy_IBD <- dplyr::select(healthy_IBD, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, gini_index, strong, pielou_evenness, faith_pd, condition)
+
+# for random forest
+healthy_IBD$healthy_or_not[healthy_IBD$condition == "healthy"] <- "healthy"
+healthy_IBD$healthy_or_not[healthy_IBD$condition != "healthy"] <- "unhealthy"
+
+healthy_IBD$healthy_or_not<- as.factor(healthy_IBD$healthy_or_not)
+healthy_IBD$condition<- as.factor(healthy_IBD$condition)
+
+table(healthy_IBD$condition)
+table(healthy_IBD$healthy_or_not)
+```
+
+Dataset combining healthy samples and CDI samples:
+
+```{r}
+healthy_CDI <- rbind.fill(all_healthy, CDI)
+
+# extract only allpha metrics and condition columns
+healthy_CDI <- dplyr::select(healthy_CDI, shannon_entropy, chao1, menhinick, margalef, fisher_alpha, simpson, gini_index, strong, pielou_evenness, faith_pd, condition)
+
+# for random forest
+healthy_CDI$healthy_or_not[healthy_CDI$condition == "healthy"] <- "healthy"
+healthy_CDI$healthy_or_not[healthy_CDI$condition != "healthy"] <- "unhealthy"
+
+healthy_CDI$healthy_or_not<- as.factor(healthy_CDI$healthy_or_not)
+healthy_CDI$condition<- as.factor(healthy_CDI$condition)
+
+table(healthy_CDI$condition)
+table(healthy_CDI$healthy_or_not)
+```
+
+```{r}
+hospital_CDI_pre_FMT <- hospital_CDI %>%
+  filter(FMT_pre_post == "pre")
+
+compare_hospital <- rbind.fill(hospital_donor, hospital_CDI_pre_FMT)
+
+compare_hospital$condition <- as.factor(compare_hospital$condition)
+
+# Sizes of each dataset
+table(compare_hospital$condition)
+```
+
+## Random forest classifier - feature importance
+
+Lets create train and test subset of data for random forest classifier. We will also use train set as a subset of balanced number of healthy and unhealthy samples for effect size estimation:
+
+```{r}
+# Let's make training and testing subset of data
+#make this example reproducible
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(healthy_disease), replace=TRUE, prob=c(0.7,0.3))
+train  <- healthy_disease[sample, ]
+test   <- healthy_disease[!sample, ]
+
+table(train$healthy_or_not)
+
+# condition groups are unbalanced. We will solve this by undersampling
+under <- ovun.sample(healthy_or_not~., data=train, method = "under", p=0.5)
+train <- under$data
+table(train$healthy_or_not)
+```
+
+Now, let's use random forest algorithm to calculate what is the importance of each alpha diversity metric for predicting health condition of a sample. Ultimately, we want to choose the metrics that differentiate the best between healthy and unhealthy samples.
+[source](https://www.r-bloggers.com/2021/07/feature-importance-in-random-forest/)
+Load *Inflammatory Bowel Disease* data:
+
+```{r}
+richness <- c("chao1", "margalef", "menhinick", "fisher_alpha", "faith_pd") 
+evenness <- c("gini_index", "strong", "pielou_evenness", "shannon_entropy", "simpson") 
+results_accuracy_all <- data.frame(model = character(0), accuracy = numeric(0) )
+
+model_all_1 <- randomForest(condition ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+model_all_2 <- randomForest(healthy_or_not ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+prediction_all_1 <- predict(model_all_1, test)
+confusion_matrix <- confusionMatrix(prediction_all_1, test$condition)
+accuracy_all_model_1 <- confusion_matrix$overall["Accuracy"]
+
+prediction_all_2 <- predict(model_all_2, test)
+confusion_matrix <- confusionMatrix(prediction_all_2, test$healthy_or_not)
+accuracy_all_model_2 <- confusion_matrix$overall["Accuracy"]
+
+for (a in richness){
+  for (b in evenness){
+    formula_1 <- as.formula(sprintf("%s ~ %s + %s", "condition", a, b))
+    model_1 <- randomForest(formula_1, data = train, importance=TRUE) 
+
+    formula_2 <- as.formula(sprintf("%s ~ %s + %s", "healthy_or_not", a, b))
+    model_2 <- randomForest(formula_2, data = train, importance=TRUE) 
+    
+    # Calculating accuracy
+    prediction_1 <- predict(model_1, test)
+    confusion_matrix <- confusionMatrix(prediction_1, test$condition)
+    accuracy_1 <- confusion_matrix$overall["Accuracy"]
+    
+    prediction_2 <- predict(model_2, test)
+    confusion_matrix <- confusionMatrix(prediction_2, test$healthy_or_not)
+    accuracy_2 <- confusion_matrix$overall["Accuracy"]
+    
+    new_row <- c(model = sprintf("%s + %s", a, b), accuracy_condition = accuracy_1, accuracy_healthy_or_not = accuracy_2)
+    results_accuracy_all <- rbind(results_accuracy_all, new_row)
+  }
+}
+
+names(results_accuracy_all)[1] <- 'model'
+names(results_accuracy_all)[2] <- 'accuracy_condition'
+names(results_accuracy_all)[3] <- 'accuracy_healthy_or_not'
+
+results_accuracy_all[nrow(results_accuracy_all)+1,] <- c("all alpha metrics", accuracy_all_model_1, accuracy_all_model_2)
+
+results_accuracy_all$accuracy_condition <- as.numeric(results_accuracy_all$accuracy_condition)
+results_accuracy_all$accuracy_healthy_or_not <- as.numeric(results_accuracy_all$accuracy_healthy_or_not)
+
+results_accuracy_all <- results_accuracy_all[order(-results_accuracy_all$accuracy_condition),]
+
+results_accuracy_all[1:10,] %>% 
+  flextable() %>% 
+  add_header_lines(values = "Accuracy of random forest classifier trained on all datasets in differnet models")
+
+write_xlsx(results_accuracy_all, here("03_plots_and_tables", "accuracy_all.xlsx"))
+
+```
+
+This table shows accuracy of random forest classifier trained on data set consisting of healthy and both IBD and CDI samples, using different models. We can see that the highest accuracy is obtained if all alpha metrics are used together. However, the decrease of accuracy is not substantial when we choose only two metrics (one representing richness metric and the other evenness metric). These are top ten models with highest accuracy. We can also see that classifier is slightly better at discriminating between healthy and unhealthy samples than at predicting specific condition category.
+
+```{r}
+# Let's make training and testing subset of data
+#make this example reproducible
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(healthy_IBD), replace=TRUE, prob=c(0.7,0.3))
+train  <- healthy_IBD[sample, ]
+test   <- healthy_IBD[!sample, ]
+
+table(train$healthy_or_not)
+
+# condition groups are unbalanced. We will solve this by undersampling
+under <- ovun.sample(healthy_or_not~., data=train, method = "under", p=0.5)
+train <- under$data
+table(train$healthy_or_not)
+table(train$condition)
+table(test$condition)
+```
+
+```{r}
+results_accuracy_IBD <- data.frame(model = character(0), accuracy_condition = numeric(0), accuracy_healthy_or_not = numeric(0) )
+
+model_IBD_1 <- randomForest(condition ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+model_IBD_2 <- randomForest(healthy_or_not ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+prediction_IBD_1 <- predict(model_IBD_1, test)
+confusion_matrix <- confusionMatrix(prediction_IBD_1, test$condition)
+accuracy_IBD_model_1 <- confusion_matrix$overall["Accuracy"]
+
+prediction_IBD_2 <- predict(model_IBD_2, test)
+confusion_matrix <- confusionMatrix(prediction_IBD_2, test$healthy_or_not)
+accuracy_IBD_model_2 <- confusion_matrix$overall["Accuracy"]
+
+for (a in richness){
+  for (b in evenness){
+    formula_1 <- as.formula(sprintf("%s ~ %s + %s", "condition", a, b))
+    model_1 <- randomForest(formula_1, data = train, importance=TRUE) 
+
+    formula_2 <- as.formula(sprintf("%s ~ %s + %s", "healthy_or_not", a, b))
+    model_2 <- randomForest(formula_2, data = train, importance=TRUE) 
+    
+    # Calculating accuracy
+    prediction_1 <- predict(model_1, test)
+    confusion_matrix <- confusionMatrix(prediction_1, test$condition)
+    accuracy_1 <- confusion_matrix$overall["Accuracy"]
+    
+    prediction_2 <- predict(model_2, test)
+    confusion_matrix <- confusionMatrix(prediction_2, test$healthy_or_not)
+    accuracy_2 <- confusion_matrix$overall["Accuracy"]
+    
+    new_row <- c(model = sprintf("%s + %s", a, b), accuracy_condition = accuracy_1, accuracy_healthy_or_not = accuracy_2)
+    results_accuracy_IBD <- rbind(results_accuracy_IBD, new_row)
+  }
+}
+
+names(results_accuracy_IBD)[1] <- 'model'
+names(results_accuracy_IBD)[2] <- 'accuracy_condition'
+names(results_accuracy_IBD)[3] <- 'accuracy_healthy_or_not'
+
+results_accuracy_IBD[nrow(results_accuracy_IBD)+1,] <- c("all alpha metrics", accuracy_IBD_model_1, accuracy_IBD_model_2)
+
+results_accuracy_IBD$accuracy_condition <- as.numeric(results_accuracy_IBD$accuracy_condition)
+results_accuracy_IBD$accuracy_healthy_or_not <- as.numeric(results_accuracy_IBD$accuracy_healthy_or_not)
+
+results_accuracy_IBD <- results_accuracy_IBD[order(-results_accuracy_IBD$accuracy_condition),]
+
+results_accuracy_IBD[1:10,] %>% 
+  flextable() %>% 
+  add_header_lines(values = "Accuracy of random forest classifier trained on IBD and healthy datasets in differnet models")
+
+write_xlsx(results_accuracy_IBD, here("03_plots_and_tables", "accuracy_IBD.xlsx"))
+```
+
+This table shows similar results as the previous one. In this data set consisting of only healthy and IBD samples accuracies of all models are slightly lower than in previous case where we had combined all datasets. Again the accuracy of predicting healthy and unhealthy samples is a bit better than when predicting specific condition category.
+
+```{r}
+# Let's make training and testing subset of data
+#make this example reproducible
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(healthy_CDI), replace=TRUE, prob=c(0.7,0.3))
+train  <- healthy_CDI[sample, ]
+test   <- healthy_CDI[!sample, ]
+
+table(train$condition)
+
+# condition groups are unbalanced. We will solve this by undersampling
+under <- ovun.sample(condition~., data=train, method = "under", p=0.5)
+train <- under$data
+table(train$condition)
+```
+
+```{r}
+results_accuracy_CDI <- data.frame(model = character(0), accuracy = numeric(0))
+
+model_all <- randomForest(condition ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+prediction_CDI_all <- predict(model_all, test)
+confusion_matrix <- confusionMatrix(prediction_CDI_all, test$condition)
+accuracy_CDI_all <- confusion_matrix$overall["Accuracy"]
+
+for (a in richness){
+  for (b in evenness){
+    formula <- as.formula(sprintf("%s ~ %s + %s", "condition", a, b))
+    model <- randomForest(formula, data = train, importance=TRUE) 
+    
+    # Calculating accuracy
+    prediction <- predict(model, test)
+    confusion_matrix <- confusionMatrix(prediction, test$condition)
+    accuracy <- confusion_matrix$overall["Accuracy"]
+    
+    new_row <- c(model = sprintf("%s + %s", a, b), accuracy = accuracy)
+    results_accuracy_CDI <- rbind(results_accuracy_CDI, new_row)
+  }
+}
+
+names(results_accuracy_CDI)[1] <- 'model'
+names(results_accuracy_CDI)[2] <- 'accuracy'
+
+results_accuracy_CDI[nrow(results_accuracy_CDI)+1,] <- c("all alpha metrics", accuracy_CDI_all)
+
+results_accuracy_CDI$accuracy <- as.numeric(results_accuracy_CDI$accuracy)
+
+results_accuracy_CDI <- results_accuracy_CDI[order(-results_accuracy_CDI$accuracy),]
+
+results_accuracy_CDI[1:10,] %>% 
+  flextable() %>% 
+  add_header_lines(values = "Accuracy of random forest classifier trained on CDI and healthy datasets in differnet models")
+
+write_xlsx(results_accuracy_CDI, here("03_plots_and_tables", "accuracy_CDI.xlsx"))
+
+```
+
+This table shows the accuracy of random forest classifier trained on healthy and CDI datasets, using different model. What we can see is that this classifier seems to be able to determine the differences between healthy and CDI samples with almost 100% accuracy in various models. This is due to difference between healthy and CDI samples.
+
+It seems that all models with Gini index perform the best in all three data sets. This is why Gini has the highest importance for this classifier. 
+
+```{r}
+model <- randomForest(condition ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = healthy_disease, importance=TRUE)
+
+importance(model)
+varImpPlot(model, main= "Mean descrease in accuracy and  Gini index over all classes")
+
+#Conditional=True, adjusts for correlations between predictors.
+i_scores <- caret::varImp(model, conditional = TRUE) 
+
+#Gathering rownames in 'var'  and converting it to the factor
+#to provide 'fill' parameter for the bar chart. 
+i_scores <- i_scores %>% tibble::rownames_to_column("var") 
+i_scores$var<- i_scores$var %>% as.factor()
+
+#Plotting the bar and polar charts for comparing variables
+importance_plot <- i_scores %>% ggplot(aes(x = .data[["healthy"]], y=reorder(var, .data[["healthy"]]), fill = var)) + 
+  geom_bar(stat = "identity", show.legend = FALSE, width = 1) + 
+  labs(x = NULL, y = NULL, title ="Mean decrease in accuracy for condition category: healthy") + 
+  theme_minimal() +
+  theme(axis.text.y = element_text(size=15)) +
+  # theme(axis.text.y = element_blank()) + 
+  scale_y_discrete(labels=c("shannon_entropy"="Shannon entropy (❋)", "chao1"="Chao1 (+)", "menhinick"="Menhinick (+)", "margalef"="Margalef (+)", "fisher_alpha"="Fisher alpha (+)", "simpson"="Simpson (❋)", "gini_index"="Gini index (x)", "strong"="Strong dominance (x)", "pielou_evenness"="Pielou evenness (x)",  "faith_pd"="Faith PD (+)"))
+
+importance_plot
+```
+
+Hospital Clínic's data:
+
+```{r}
+# Let's make training and testing subset of data
+#make this example reproducible
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(compare_hospital), replace=TRUE, prob=c(0.7,0.3))
+train  <- compare_hospital[sample, ]
+test   <- compare_hospital[!sample, ]
+
+table(train$condition)
+table(test$condition)
+```
+
+```{r}
+results_accuracy_CDI_hospital <- data.frame(model = character(0), accuracy = numeric(0))
+
+model_all_hospital <- randomForest(condition ~ shannon_entropy + chao1 + menhinick + margalef + fisher_alpha + simpson + gini_index + strong + pielou_evenness + faith_pd, data = train, importance=TRUE)
+
+prediction_CDI_all <- predict(model_all_hospital, test)
+confusion_matrix <- confusionMatrix(prediction_CDI_all, test$condition)
+accuracy_CDI_all <- confusion_matrix$overall["Accuracy"]
+
+for (a in richness){
+  for (b in evenness){
+    formula <- as.formula(sprintf("%s ~ %s + %s", "condition", a, b))
+    model <- randomForest(formula, data = train, importance=TRUE) 
+    
+    # Calculating accuracy
+    prediction <- predict(model, test)
+    confusion_matrix <- confusionMatrix(prediction, test$condition)
+    accuracy <- confusion_matrix$overall["Accuracy"]
+    
+    new_row <- c(model = sprintf("%s + %s", a, b), accuracy = accuracy)
+    results_accuracy_CDI_hospital <- rbind(results_accuracy_CDI_hospital, new_row)
+  }
+}
+
+names(results_accuracy_CDI_hospital)[1] <- 'model'
+names(results_accuracy_CDI_hospital)[2] <- 'accuracy'
+
+results_accuracy_CDI_hospital[nrow(results_accuracy_CDI_hospital)+1,] <- c("all alpha metrics", accuracy_CDI_all)
+
+results_accuracy_CDI_hospital$accuracy <- as.numeric(results_accuracy_CDI_hospital$accuracy)
+
+results_accuracy_CDI <- results_accuracy_CDI[order(-results_accuracy_CDI_hospital$accuracy),]
+
+results_accuracy_CDI_hospital[1:10,] %>% 
+  flextable() %>% 
+  add_header_lines(values = "Accuracy of random forest classifier trained on CDI and healthy datasets in differnet models")
+
+write_xlsx(results_accuracy_CDI_hospital, here("03_plots_and_tables", "accuracy_CDI_hospital.xlsx"))
+
+```
+
+
+## Wilcoxon test and statistical power (HEALTHY vs UNHEALTHY)
+
+```{r}
+table(healthy_disease$healthy_or_not)
+```
+
+```{r}
+test <- list()
+
+tibble <- tibble()
+
+for (i in 1:length(metric)){
+  # Wilcoxon test
+  test[[i]] <- pairwise.wilcox.test(healthy_disease[[metric[i]]], healthy_disease$healthy_or_not, p.adjust.method="none") %>% 
+  broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+  # test[[i]]$p.value <- round(test[[i]]$p.value, digits = 16)
+  
+  # Effect size
+  tibble_a <- healthy_disease %>% wilcox_effsize(
+    as.formula(sprintf("%s ~ %s", metric[i], "healthy_or_not")), 
+    ref.group = "healthy",
+    paired = FALSE,
+    alternative = "two.sided",
+    ci = TRUE,
+    conf.level = 0.95,
+    ci.type = "perc",
+    nboot = 1000
+  )
+  tibble <- bind_rows(tibble, tibble_a)
+}
+
+tests_1 <- do.call(what = rbind, args = test)
+
+names(tibble)[names(tibble) == '.y.'] <- 'parameter'
+eff_size <- tibble[, !names(tibble) %in% c("group1", "group2")]
+
+tests_1 <- inner_join(tests_1, eff_size , by= "parameter")
+
+test_1_show <- tests_1 %>% 
+  # add_column(p.adjusted = round(p.adjust(tests_1$p.value, "fdr"), 16), .after='p.value') %>%
+  add_column(p.adjusted = p.adjust(tests_1$p.value, "fdr"), .after='p.value') %>%
+  arrange(-effsize)  
+
+test_1_show %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Wilcox test for distributions of healthy vs unhealthy samples")
+
+#write.csv(tests_1, gzfile(here("03_plots_and_tables", "eff_size.csv")), row.names=FALSE)
+#install.packages("writexl")
+library(writexl)
+write_xlsx(test_1_show, here("03_plots_and_tables", "eff_size.xlsx"))
+```
+
+Lets try calculating statistical power in a subset of data with equal number of healthy and unhealthy samples:
+
+```{r}
+set.seed(1)
+
+#use 70% of dataset as training set and 30% as test set
+sample <- sample(c(TRUE, FALSE), nrow(healthy_disease), replace=TRUE, prob=c(0.7,0.3))
+train  <- healthy_disease[sample, ]
+test   <- healthy_disease[!sample, ]
+
+# condition groups are unbalanced. We will solve this by undersampling
+under <- ovun.sample(healthy_or_not~., data=train, method = "under", p=0.5)
+train <- under$data
+
+test <- list()
+tibble <- tibble()
+
+for (i in 1:length(metric)){
+  # Wilcoxon test
+  test[[i]] <- pairwise.wilcox.test(train[[metric[i]]], train$healthy_or_not, p.adjust.method="none") %>% 
+  broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+  test[[i]]$p.value <- round(test[[i]]$p.value, digits = 5)
+  
+  # Effect size
+  tibble_a <- train %>% wilcox_effsize(
+    as.formula(sprintf("%s ~ %s", metric[i], "healthy_or_not")), 
+    ref.group = "healthy",
+    paired = FALSE,
+    alternative = "two.sided",
+    ci = TRUE,
+    conf.level = 0.95,
+    ci.type = "perc",
+    nboot = 1000
+  )
+  tibble <- bind_rows(tibble, tibble_a)
+}
+
+tests_1b <- do.call(what = rbind, args = test)
+
+names(tibble)[names(tibble) == '.y.'] <- 'parameter'
+eff_size <- tibble[, !names(tibble) %in% c("group1", "group2")]
+
+tests_alla <- inner_join(tests_1b, eff_size , by= "parameter")
+
+tests_alla %>% 
+  add_column(p.adjusted = round(p.adjust(tests_alla$p.value, "fdr"),5), .after='p.value') %>%
+  arrange(-effsize)  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Wilcox test for distributions of healthy vs unhealthy samples in balanced subset of data")
+```
+
+In more balanced subsample of data (with nearly equal number of samples in both group) the effect sizes are somewhat higher than in unbalanced sample. Only Gini's effect size increased enough to have large magnitude.
+
+
+```{r}
+test <- list()
+
+tibble <- tibble()
+
+for (i in 1:length(metric)){
+  # Wilcoxon test
+  test[[i]] <- pairwise.wilcox.test(compare_hospital[[metric[i]]], compare_hospital$condition, p.adjust.method="none") %>% 
+  broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+  test[[i]]$p.value <- round(test[[i]]$p.value, digits = 5)
+  
+  # Effect size
+  tibble_a <- compare_hospital %>% wilcox_effsize(
+    as.formula(sprintf("%s ~ %s", metric[i], "condition")), 
+    ref.group = "healthy_donors",
+    paired = FALSE,
+    alternative = "two.sided",
+    ci = TRUE,
+    conf.level = 0.95,
+    ci.type = "perc",
+    nboot = 1000
+  )
+  tibble <- bind_rows(tibble, tibble_a)
+}
+
+tests_1 <- do.call(what = rbind, args = test)
+
+names(tibble)[names(tibble) == '.y.'] <- 'parameter'
+eff_size <- tibble[, !names(tibble) %in% c("group1", "group2")]
+
+tests_1 <- inner_join(tests_1, eff_size , by= "parameter")
+
+tests_1 %>% 
+  add_column(p.adjusted = round(p.adjust(tests_1$p.value, "fdr"), 5), .after='p.value') %>%
+  arrange(-effsize)  %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Wilcox test for distributions of healthy donors vs CDI samples from Hospital CLinic")
+```
+
+## Wilcoxon test - CONDITIONS
+
+```{r}
+test <- list()
+
+for (i in 1:length(metric)){
+  test[[i]] <- pairwise.wilcox.test(healthy_disease[[metric[i]]], healthy_disease$condition, p.adjust.method="none") %>% 
+  broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+  test[[i]]$p.value <- round(test[[i]]$p.value, digits = 5)
+}
+
+tests_2 <- do.call(what = rbind, args = test)
+
+tests_2 %>% 
+  add_column(p.adjusted = round(p.adjust(tests_2$p.value, "fdr"),5), .after='p.value') %>%
+  arrange(p.value)  %>%
+  filter(group1=="healthy" | group2=="healthy") %>%
+  flextable() %>% 
+  bold(~ p.value < 0.05, 4) %>%
+  bold(~ p.adjusted < 0.05, 5) %>%
+  add_header_lines(values = "Results of the Wilcox test for distributions of different conditions")
+```
+
+Simpson, Strong and Pielou can't differentiate between UC and healthy
+
+## Comparing singe sample to healthy sample distribution with modified t-test
+
+
+```{r}
+set.seed(1)
+
+#use 70% of dataset as healthy population and 30% as healthy samples to test 
+sample <- sample(c(TRUE, FALSE), nrow(all_healthy), replace=TRUE, prob=c(0.7,0.3))
+healthy_popul  <- all_healthy[sample, ]
+healthy_test   <- all_healthy[!sample, ]
+
+nrow(healthy_popul)
+nrow(healthy_test)
+
+# samples to test 
+test_samples <- rbind.fill(healthy_test, CDI)
+test_samples$condition <- as.factor(test_samples$condition)
+test_samples$condition <- relevel(test_samples$condition, "healthy")
+
+#test_samples <- rbind.fill(healthy_popul, CDI)
+
+
+nrow(test_samples)
+```
+
+```{r}
+library(table1)
+
+CrawfordHowell <- function(case, control){
+  tval <- (case - mean(control)) / (sd(control)*sqrt((length(control)+1) / length(control)))
+  degfree <- length(control)-1
+  pval <- pt(tval, df=degfree) #one-tailed T test
+  result <- data.frame(t = tval, df = degfree, p=pval)
+  return(result)
+}
+
+table_list <- list()
+all_tables <- data.frame()
+
+for (i in 1:length(metric)){
+
+    t_statistics <- list()
+    t_prob <- list()
+    result <- data.frame()
+    
+    for (n in 1:nrow(test_samples)){
+      result <- CrawfordHowell(test_samples[[metric[i]]][n], healthy_popul[[metric[i]]]) 
+      t_statistics <- append(t_statistics, result[1])
+      t_prob <- append(t_prob, result[3])
+    }
+    
+    t_test_results <- test_samples[, c("sample_id", "condition")]
+    t_test_results$metric <- test_samples[[metric[i]]]
+    t_test_results$t_statistic <- unlist(t_statistics)
+    t_test_results$t_probability <- unlist(t_prob)
+    t_test_results$t_probability <- round(t_test_results$t_probability, digits=3)
+    
+    table_list[[i]] <- t_test_results
+    
+    all_tables_next <- data.frame(table1(~ t_probability | condition, data=t_test_results, overall=F, render.continuous=c("Mean (Min, Max)"="MEAN (MIN, MAX)")))
+    all_tables <- rbind(all_tables, all_tables_next)
+}
+
+# Loop through each row of the merged data frame and add names of metrics
+
+replacement_index <- 0
+
+for (i in 1:nrow(all_tables)) {
+  # Check if the value in the first column is "t_probability"
+  if (all_tables[i, 1] == "t_probability") {
+    # Calculate the index for replacement from the replacement list
+    replacement_index <- replacement_index + 1
+    # Substitute the value with the replacement value
+    all_tables[i, 1] <- metric[replacement_index]
+  }
+}
+
+rows_to_remove <- grepl("^\\(N\\=?", all_tables[,2])
+rows_to_remove[1] <- FALSE
+all_tables <- all_tables[!rows_to_remove, ]
+```
+
+```{r}
+list_count <- list()
+
+for (i in 1:length(metric)){
+  max_CDI <- max( table_list[[i]][table_list[[i]]$condition == "CDI" ,]$t_probability)
+  lower_than_CDI <- sum(table_list[[i]][ table_list[[i]]$condition == "healthy" ,]$t_probability < max_CDI)
+  list_count <- append(list_count, lower_than_CDI)
+}
+
+overlap_df <- data.frame(Parameter = metric, Overlaped_samples = unlist(list_count))
+
+overlap_df
+
+write_xlsx(overlap_df, here("03_plots_and_tables", "overlap_1.xlsx"))
+```
+
+```{r}
+write_xlsx(all_tables, here("03_plots_and_tables", "t_test.xlsx"))
+
+all_tables %>% flextable()
+```
+
+```{r}
+p<- vector("list", length(metric))
+
+for (i in 1:length(metric)){
+p[[i]] <- ggplot(table_list[[i]], aes(x=t_probability, color=condition)) +
+  #geom_histogram(stat="bin", bins=40, position=position_dodge())+
+  geom_density( adjust = 1/6) +
+  geom_hline(yintercept=0, colour="white", size=0.5) +
+  ggtitle(metric[i])+
+  theme(legend.position = "none", plot.title = element_text(size=10)) +
+  xlab("")
+}
+
+grid.arrange(p[[1]], p[[2]], p[[3]], p[[4]], p[[5]], p[[6]],p[[7]], p[[8]],p[[9]], p[[10]], ncol=4)
+```
+
+```{r}
+p<- vector("list", length(metric))
+
+for (i in 1:length(metric)){
+p[[i]] <- ggplot(table_list[[i]], aes(x=t_probability, fill=condition)) +
+  geom_histogram(stat="bin", bins=40, position= "identity", alpha=0.7)+
+  #geom_density() +
+  xlab("")+
+  ylab("")+
+  ggtitle(metric[i])+
+  theme(legend.position = "none", plot.title = element_text(size=10)) +
+  xlab("")+
+  ylab("")+
+  ggtitle(metric[i])
+}
+
+grid.arrange(p[[1]], p[[2]], p[[3]], p[[4]], p[[5]], p[[6]],p[[7]], p[[8]],p[[9]], p[[10]], ncol=4)
+```
+
+```{r}
+mean_healthy <- mean(healthy_popul$strong)
+SD_healthy <- sd(healthy_popul$strong)
+
+t_statistics <- list()
+t_prob <- list()
+
+for (n in 1:nrow(test_samples)){
+  x <- test_samples$strong[n]
+  t_stat_x <- (x-mean_healthy)/(SD_healthy*sqrt((nrow(healthy_popul)+1)/nrow(healthy_popul)))
+  t_statistics <- append(t_statistics, t_stat_x)
+  t_prob_x <- pt(t_stat_x, df=nrow(healthy_popul)-1, lower.tail=FALSE)
+  t_prob <- append(t_prob, t_prob_x)
+}
+
+t_test_results <- test_samples[, c("sample_id", "strong", "condition")]
+t_test_results$t_statistic <- unlist(t_statistics)
+t_test_results$t_probability <- unlist(t_prob)
+
+table1(~ strong + t_probability | condition, data=t_test_results, caption = "Results for alpha metric: strong")
+```
+
+
+## Hospital Clćnic's data
+
+```{r}
+## First option - mix donor samples from CDI data set and stool donor data set and saple control population from this
+set.seed(1)
+
+all_healthy_donors <- rbind.fill(hospital_donor, hospital_CDI[hospital_CDI$condition=="donor",])
+all_healthy_donors[all_healthy_donors == "healthy_donors"] <- 'donor'
+
+#use 70% of dataset as healthy population and 30% as healthy samples to test 
+sample <- sample(c(TRUE, FALSE), nrow(hospital_donor), replace=TRUE, prob=c(0.7,0.3))
+healthy_popul  <- hospital_donor[sample, ]
+healthy_test   <- hospital_donor[!sample, ]
+
+nrow(healthy_popul)
+nrow(healthy_test)
+
+# samples to test 
+test_samples <- rbind.fill(healthy_test, hospital_CDI[hospital_CDI$condition!="donor",])
+test_samples[test_samples == "healthy_donors"] <- 'donor'
+
+table(healthy_popul$condition)
+table(test_samples$condition)
+
+nrow(test_samples)
+
+
+# Second option - use stool biobank data set as control
+
+healthy_popul <- hospital_donor
+test_samples <- hospital_CDI
+
+```
+
+```{r}
+# modified t-test for upper tail
+CrawfordHowell_2 <- function(case, control){
+  tval <- (case - mean(control)) / (sd(control)*sqrt((length(control)+1) / length(control)))
+  degfree <- length(control)-1
+  pval <- pt(tval, df=degfree, lower.tail=FALSE) 
+  result <- data.frame(t = tval, df = degfree, p=pval)
+  return(result)
+}
+
+all_tables_2 <- data.frame()
+table_list_2 <-  list()
+
+for (i in 1:length(metric)){
+
+    t_statistics <- list()
+    t_prob <- list()
+    result <- data.frame()
+    
+    for (n in 1:nrow(test_samples)){
+      if(metric[i] != "gini_index" & metric[i] != "strong"){
+        result <- CrawfordHowell(test_samples[[metric[i]]][n], healthy_popul[[metric[i]]]) 
+      } else {
+        result <- CrawfordHowell_2(test_samples[[metric[i]]][n], healthy_popul[[metric[i]]])
+      }
+      t_statistics <- append(t_statistics, result[1])
+      t_prob <- append(t_prob, result[3])
+    }
+    
+    t_test_results <- test_samples[, c("sample_id", "condition")]
+    t_test_results$metric <- test_samples[[metric[i]]]
+    t_test_results$t_statistic <- unlist(t_statistics)
+    t_test_results$t_probability <- unlist(t_prob)
+    t_test_results$t_probability <- round(t_test_results$t_probability, digits=3)
+    
+    table_list_2[[i]] <- t_test_results
+
+    all_tables_next <- data.frame(table1(~ t_probability | condition, data=t_test_results, overall=F, render.continuous=c("Mean (Min, Max)"="MEAN (MIN, MAX)")))
+    all_tables_2 <- rbind(all_tables_2, all_tables_next)
+}
+
+# Loop through each row of the merged data frame and add names of metrics
+
+replacement_index <- 0
+
+for (i in 1:nrow(all_tables_2)) {
+  # Check if the value in the first column is "t_probability"
+  if (all_tables_2[i, 1] == "t_probability") {
+    # Calculate the index for replacement from the replacement list
+    replacement_index <- replacement_index + 1
+    # Substitute the value with the replacement value
+    all_tables_2[i, 1] <- metric[replacement_index]
+  }
+}
+
+rows_to_remove <- grepl(c("^\\(N\\=?"), all_tables_2[,2])
+rows_to_remove[1] <- FALSE
+all_tables_2 <- all_tables_2[!rows_to_remove, ]
+```
+
+```{r}
+library(writexl)
+write_xlsx(all_tables_2, here("03_plots_and_tables", "t_test_hospital.xlsx"))
+
+all_tables_2 %>% flextable()
+```
+
+
+```{r}
+p<- vector("list", length(metric))
+
+for (i in 1:length(metric)){
+p[[i]] <- ggplot(table_list_2[[i]], aes(x=t_probability, color=condition)) +
+  geom_density(adjust = 1/6) +
+  ggtitle(metric[i])+
+  theme(legend.position = "none", plot.title = element_text(size=10)) +
+  xlab("")
+}
+
+grid.arrange(p[[1]], p[[2]], p[[3]], p[[4]], p[[5]], p[[6]],p[[7]], p[[8]],p[[9]], p[[10]], ncol=4)
+```
+
+
+```{r}
+p<- vector("list", length(metric))
+
+for (i in 1:length(metric)){
+p[[i]] <- ggplot(table_list_2[[i]], aes(x=t_probability, fill=condition)) +
+  geom_histogram(stat="bin", bins=40, position= "identity", alpha=0.7)+
+  #geom_density() +
+  xlab("")+
+  ylab("")+
+  ggtitle(metric[i])+
+  theme(legend.position = "none", plot.title = element_text(size=10)) +
+  xlab("")+
+  ylab("")+
+  ggtitle(metric[i])
+}
+
+grid.arrange(p[[1]], p[[2]], p[[3]], p[[4]], p[[5]], p[[6]],p[[7]], p[[8]],p[[9]], p[[10]], ncol=4)
+```
+
+```{r}
+list_count_pre <- list()
+list_count_post <- list()
+
+for (i in 1:length(metric)){
+  max_CDIpre <- max( table_list_2[[i]][table_list_2[[i]]$condition == "Cdif_pre" ,]$t_probability)
+  max_CDIpost <- max( table_list_2[[i]][table_list_2[[i]]$condition == "Cdif_post" ,]$t_probability)
+  
+  lower_than_CDIpre <- sum(table_list_2[[i]][ table_list_2[[i]]$condition == "donor" ,]$t_probability < max_CDIpre)
+  lower_than_CDIpost <- sum(table_list_2[[i]][ table_list_2[[i]]$condition == "donor" ,]$t_probability < max_CDIpost)
+  
+  list_count_pre <- append(list_count_pre, lower_than_CDIpre)
+  list_count_post <- append(list_count_post, lower_than_CDIpost)
+}
+
+overlap_df_2 <- data.frame(Parameter = metric, Overlaped_CDIpre = unlist(list_count_pre), Overlaped_CDIpost = unlist(list_count_post))
+
+write_xlsx(overlap_df_2, here("03_plots_and_tables", "overlap_2.xlsx"))
+```
+
+## Visualising the difference
+
+### Gini vs Faith plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(faith_pd))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(gini_index))
+
+ggplot(healthy_disease, aes(faith_pd, gini_index)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Gini vs Menhinick plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(menhinick))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(gini_index))
+
+ggplot(healthy_disease, aes(menhinick, gini_index)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Gini vs Faith plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(chao1))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(gini_index))
+
+ggplot(healthy_disease, aes(chao1, gini_index)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Manhinick vs Strong plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(menhinick))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(strong))
+
+ggplot(healthy_disease, aes(menhinick, strong)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Margalef vs Strong plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(margalef))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(strong))
+
+ggplot(healthy_disease, aes(margalef, strong)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Faith vs Strong plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(faith_pd))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(strong))
+
+ggplot(healthy_disease, aes(faith_pd, strong)) + geom_jitter(aes(colour = healthy_or_not)) + 
+  geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+  geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+### Manihinick vs Pielou plot:
+
+```{r}
+mean_vline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_v = mean(menhinick))
+mean_hline <- healthy_disease %>% dplyr::group_by(healthy_or_not) %>% dplyr::summarise(grp_mean_h = mean(pielou_evenness))
+
+ ggplot(healthy_disease, aes(menhinick, pielou_evenness)) + geom_jitter(aes(colour = healthy_or_not)) + 
+   geom_hline(data = mean_hline, aes(yintercept = grp_mean_h, color = healthy_or_not), linetype = "dashed") + 
+   geom_vline(data = mean_vline, aes(xintercept = grp_mean_v, color = healthy_or_not), linetype = "dashed")
+```
+
+* Dominance (Strong) and evenness (Pielou) are complementary.

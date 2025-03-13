@@ -1,0 +1,580 @@
+---
+title: "Characterisation of healthy samples from American Gut Project"
+author:
+- name: "Natasa Mortvanski"
+  affiliation: Universitat Pompeu Fabra
+  email: natasa.mortvanski01@estudiant.upf.edu
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup,  include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document contains statistical analysis of filtered subset of healthy samples from American Gut Project data set. Part of the analysis is in the form of interactive Shiny app (density_box_app.R in ... directory of this R project).
+
+Loading libraries:
+
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(plyr)
+#install.packages('cowplot')
+library(cowplot)
+library(tibble)
+library(flextable)
+#install.packages('nortest')
+library(nortest)
+#install.packages('PerformanceAnalytics')
+library(PerformanceAnalytics)
+library(corrplot)
+library(RColorBrewer)
+library(here)
+```
+
+Load healthy subsample of AGP data: 
+
+```{r}
+#AGP <- read.csv(here("01_tidy_data", "AGP_all.csv.gz"), header = TRUE, sep = ",")
+all_healthy <- read.csv(here("01_tidy_data", "AGP_healthy.csv.gz"), header = TRUE, sep = ",")
+
+#nrow(AGP)
+nrow(all_healthy)
+```
+
+```{r}
+label_fun <- function(x){
+  if (x == "shannon_entropy"){y <- "Shannon entropy"} else if (x =="chao1"){y <- "Chao1"} else if (x == "menhinick"){y <- "Menhinick"} else if (x == "margalef"){y <- "Margalef"} else if (x == "fisher_alpha"){y <- "Fisher alpha"} else if (x == "simpson"){y <- "Simpson"} else if (x == "gini_index"){y <- "Gini index"} else if (x == "strong"){y <- "Strong dominance"} else if (x == "pielou_evenness"){y <- "Pielou evenness"} else if (x == "faith_pd"){y <- "Faith PD"}
+  return(y)
+}
+```
+
+## Distributions of diversity metrics (histograms)
+
+Let's define vector of names of the alpha diversity metrics that are going to be analysed:
+
+```{r}
+metric <- c("chao1", "margalef", "menhinick", "fisher_alpha", "faith_pd", "gini_index", "strong", "pielou_evenness", "shannon_entropy", "simpson") 
+```
+
+Generate a vector of 10 random colors for histograms:
+
+```{r}
+qual_col_pals <- brewer.pal.info[brewer.pal.info$category == 'qual',]
+colors <- unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+```
+
+Let's plot the distributions of different alpha diversity metrics in this healthy subset of data:
+
+```{r}
+metric2 <- c("gini_index", "strong", "shannon_entropy", "simpson", "pielou_evenness", "chao1", "faith_pd", "fisher_alpha", "menhinick", "margalef") 
+
+histo <- vector('list', length(metric2))
+
+for (i in 1:length(metric2)){
+  histo[[i]] <- all_healthy %>% ggplot(aes(x = .data[[metric2[i]]])) +
+    geom_histogram(aes(y=..density..), colour="black", fill="white", bins=30)+
+    geom_density(alpha=.2, fill=colors[i]) +
+    ylab(label = "") +
+    xlab(label_fun(metric2[i])) +
+    theme_classic()+ 
+    theme(axis.title.x = element_text(size=14))
+}
+
+#png(file = here("03_plots_and_tables", "density_plot_AGP.png"), width = 3000, height = 2000, res = 300)
+
+grid.arrange(histo[[1]], histo[[2]],histo[[3]], histo[[4]],histo[[5]], histo[[6]],histo[[7]], histo[[8]],histo[[9]], histo[[10]], ncol=3, left = textGrob("density", rot = 90, gp = gpar(fontsize = 14)))
+
+#dev.off()
+```
+
+### Testing for normality
+
+Shapiro-Wilk’s method is widely recommended for normality test and it provides better power than K-S. It is based on the correlation between the data and the corresponding normal scores.
+
+```{r}
+pval_sp <- list()
+stat_sp <- list()
+
+for (i in 1:length(metric)){
+  pval_sp[i] <- shapiro.test(all_healthy[[metric[i]]])[2]
+  stat_sp[i] <- shapiro.test(all_healthy[[metric[i]]])[1]
+}
+
+stat_sp <- lapply(stat_sp, unname) %>% unlist(stat_sp)
+pval_sp <- unlist(pval_sp)
+
+table_saphiro <- data.frame(metric=metric, statistic=stat_sp, p.value=pval_sp) 
+#table_saphiro$p.value <- round(table_saphiro$p.value, digits = 16)
+
+skewness_list <- list()
+kurtosis_list <- list()
+
+for(i in 1:length(metric)){
+  #calculate skewness
+  sk <- skewness(all_healthy[[metric[i]]])
+  skewness_list <- append(skewness_list, sk)
+  #calculate kurtosis
+  kr <- kurtosis(all_healthy[[metric[i]]])
+  kurtosis_list <- append(kurtosis_list, kr)
+}
+
+table_saphiro$skewness <- unlist(skewness_list)
+table_saphiro$kurtosis <- unlist(kurtosis_list)
+
+table_saphiro %>% 
+  arrange(desc(statistic)) %>%
+  flextable() %>%
+  add_header_lines(values = "Normality test (Shapiro-Wilk), skewness and kurtosis of different metrics")
+
+library(writexl)
+write_xlsx(table_saphiro, here("03_plots_and_tables", "skewness_table.xlsx"))
+```
+
+Normal distribution:
+* p-value > 0.05 for Shapiro-Wilk’s statistic
+* skewness = 0
+* kurtosis = 3
+
+Consclusion: none of the metrics follow perfect normal distribution. However, Faith PD, Menhinick and Margalef are closest to normality.
+
+
+## Correlations
+
+Most of the variables in metadata are categorical. Only few variables are numerical. We can calculate Pearson's correlation coefficient only for two numerical variables. However, we also want to know which categorical factors possibly affect alpha diversity. That's why we are going to construct linear regression model to retrieve coefficients of determination as measure of the impact of categorical variable on alpha diversity.
+
+### Explore correlations of numerical variables with alhpa metrics
+
+First lets check correlations between alpha diversity metrics:
+
+```{r}
+only_metrics <- all_healthy[,2:11]
+cor_matrix <- cor(only_metrics, method = "spearman")
+colnames(cor_matrix) <-  rep(c("Shannon entropy", "Chao1", "Menhinick", "Margalef", "Fisher alpha", "Gini index", "Strong dominance", "Simpson", "Faith PD", "Pielou evenness"))
+rownames(cor_matrix) = rep(c("Shannon entropy", "Chao1", "Menhinick", "Margalef", "Fisher alpha", "Gini index", "Strong dominance", "Simpson", "Faith PD", "Pielou evenness"))
+
+#png(file = here("03_plots_and_tables", "AGP_density_corr.png"), width = 2000, height = 2000, res = 300) 
+corr_plt <- corrplot(cor_matrix, order = 'hclust', addrect = 3, tl.col = "black", tl.srt = 45)
+#dev.off() 
+```
+
+```{r}
+chart.Correlation(only_metrics, histogram=TRUE, pch=19)
+```
+From this we can see that most of the alpha metrics are positively correlated except from Gini index and Strong's dominance index which are positively correlated among themselves and negatively correlated with the rest of the metrics.
+
+We can also see three "blocks" of alpha metrics which are strongly positively correlated - 
+* first: Chao1, Fisher's, Manhinick's richness index, Margalef' richness index and Faith's phylogenetic diversity, 
+* second: Shannon's entropy, Simpson' index and Pielou's evenness, 
+* third: Gini index and Strong's dominance index.
+
+Lets see what happenes if we invert Gini index and Strong's dominance index:
+
+```{r}
+metrics_invert <- only_metrics
+metrics_invert$gini_index <- 1/metrics_invert$gini_index
+metrics_invert$strong <- 1/metrics_invert$strong
+
+cor_matrix_invert <- cor(metrics_invert, method = "spearman")
+
+corrplot(cor_matrix_invert, order = 'hclust', addrect = 2, tl.col = "black", tl.srt = 45)
+```
+
+From this we can see that most of the alpha metrics are positively correlated except from Gini index and Strong's dominance index which are positively correlated among themselves and negatively correlated with the rest of the metrics.
+
+We can also see three "blocks" of alpha metrics which are strongly positively correlated - 
+* first: Chao1, Fisher's, Manhinick's richness index, Margalef' richness index and Faith's phylogenetic diversity, 
+* second: Shannon's entropy, Simpson' index and Pielou's evenness, 
+* third: Gini index and Strong's dominance index.
+
+Lets see what happens if we invert Gini index and Strong's dominance index:
+
+```{r}
+metrics_invert <- only_metrics
+metrics_invert$gini_index <- 1/metrics_invert$gini_index
+metrics_invert$strong <- 1/metrics_invert$strong
+
+cor_matrix_invert <- cor(metrics_invert, method = "spearman")
+
+corrplot(cor_matrix_invert, order = 'hclust', addrect = 2, tl.col = "black", tl.srt = 45)
+```
+
+Now we have two groups. Seems like inverted Gini index and Strong dominance index correlate better with alpha metrics that account for both richness and evenness, although Gini seems to have decent correlation with richness measures as well.
+
+#### Exploratory Factor Analysis
+
+Lets confirm that richness and evenness are two different aspects of alpha diversity captured by these 10 metrics by using Exploratory Factor Analysis.
+The input is a correlation matrix of observed variables and the output is a summary of how each observed variable maps onto latent, unobserved “factors.” 
+
+```{r}
+library(psych)
+library(car)
+
+cor_matrix <- cor(only_metrics)
+
+# Scree plot
+fafitfree <- fa(only_metrics, nfactors = ncol(cor_matrix), rotate = "none")
+n_factors <- length(fafitfree$e.values)
+scree     <- data.frame(
+  Factor_n =  as.factor(1:n_factors), 
+  Eigenvalue = fafitfree$e.values)
+ggplot(scree, aes(x = Factor_n, y = Eigenvalue, group = 1)) + 
+  geom_point() + geom_line() +
+  xlab("Number of factors") +
+  ylab("Initial eigenvalue") +
+  labs( title = "Scree Plot", 
+        subtitle = "(Based on the unreduced correlation matrix)")
+
+
+# Parallel analysis
+parallel <- fa.parallel(cor_matrix)
+## Parallel analysis suggests that the number of factors =  2  and the number of components =  1 
+
+# Factor analysis using fa method
+fa.none <- fa(r=cor_matrix, 
+ nfactors = 2, 
+ fm= 'pa'  , 
+ max.iter=100, 
+ rotate= 'varimax') 
+print(fa.none)
+
+fa.diagram(fa.none)
+```
+
+EFA shows that there are two underlying factors that probably indicate richness and evenness.
+However, due to these metrics being non-normally distributed, the results of this analysis might be compromised.
+
+For other numerical variables we can perform simple Pearson's correlation coefficient:
+
+```{r}
+# Identify numeric columns
+num_cols <- unlist(lapply(all_healthy, is.numeric)) 
+
+# Subset numeric columns of data
+data_num <- all_healthy[ , num_cols]
+data_num$birth_year <- NULL
+
+# Save results as data frame
+correlation_num <- as.data.frame(cor(data_num[-c(11:14)], data_num[-c(1:10)]))
+correlation_num %>% tibble::rownames_to_column() %>% flextable()
+
+# Plot correlation 
+cor_matrix <- cor(data_num[-c(1:10)], data_num[-c(11:14)] , method = "spearman")
+
+corrplot(cor_matrix, method = 'color', tl.col = "black", tl.srt = 45, is.corr = FALSE)
+```
+
+Correlations between numerical variables and alpha metrics are really weak. We can conclude that age, BMI height and weight do not affect significantly alpha diversity (*we have already filtered out samples of age <20 and >69 and of BMI <18,5 and >25).
+
+### Explore correlations of categorical variables with alpha metrics
+
+For a simple case of linear regression, where continuous dependent variable is Y and there is just one continuous variable X, the numeric value of the r-squared is equal to the square of the correlation of X and Y. 
+
+Now if we have one continuous variable and one categorical variable, it is impossible to calculate the correlation between them. However, we can use regression to derive the coefficient of determination that can be treated similarly to correlation. For that, we need to make a regression model taking the continuous variable as dependent variable and categorical variable as independent variable ([source link](https://rpubs.com/riazakhan94/correlation_between_categorical_and_continuous_variable)). This is possible because as long as  dependent variable is continuous, the predictors can be anything (nominal or ordinal categorical, or continuous, or a mix) ([source link](https://stats.stackexchange.com/questions/267121/regression-for-categorical-independent-variables-and-a-continuous-dependent-one)). The model gives a r-sq value that represents the *proportion of the variance in the response variable of a regression model that can be explained by the predictor variables*. This value ranges from 0 to 1 ([source link](https://www.statology.org/multiple-r-vs-r-squared/)). We need to take the square root of that r-sq value.
+
+More info about the interpretation: [source link](https://www.statology.org/r-linear-regression-with-categorical-variables/)
+
+```{r, message=FALSE}
+# Extract categorical variables from all_healthy data frame:
+cat_cols <- unlist(lapply(all_healthy, is.character)) 
+
+# Subset numeric variables from meta data:
+data_cat <- all_healthy[ , cat_cols]
+data_cat$sample_id <- NULL
+data_cat$condition <- NULL
+```
+
+```{r, message=FALSE}
+# Calculate regression coefficient for all categorical variables in relation to all alpha diversity metrics
+correlation_cat <- data.frame(variable=character(0))
+
+for (i in 1:ncol(data_cat)){
+  correlation_cat[i,1] <- colnames(data_cat)[i]
+}
+
+for (j in 2:11){
+  temp <- data.frame(col = numeric(0))
+  for (i in 1:ncol(data_cat)){
+    names(temp)[1] <- colnames(all_healthy)[j]
+    model <- lm(all_healthy[,j] ~ data_cat[,i])
+    sumry <- summary(model)
+    r <- sqrt(sumry$r.squared)
+    temp[i,1] <- r
+  }
+  correlation_cat <- cbind(correlation_cat, temp)
+}
+
+modelXY <- lm(all_healthy$shannon_entropy ~ data_cat$age_cat)
+
+
+## model summary
+sumryXY <- summary(modelXY)
+
+## r-sq of model
+rsqXY <- sumryXY$r.squared
+```
+
+
+```{r, message=FALSE}
+# Extract first 10 variables with the biggest influence on alpha metrics
+most_correlated <- data.frame(variable=character(20),regression_coefficient=numeric(20))
+
+for (j in 2:11){
+  temp <- data.frame(variable=character(20), regression_coefficient=numeric(20))
+  names(temp)[2] <- paste("regression_coefficient", colnames(correlation_cat)[j], sep="_")
+  temp[,1] <- head(correlation_cat[order(-correlation_cat[,j]),]$variable, 20)
+  temp[,2] <- head(correlation_cat[order(-correlation_cat[,j]),][,j], 20)
+  most_correlated <- cbind(most_correlated, temp)
+}
+
+most_correlated[,1:2] <- NULL
+```
+
+Plot "correlations" of categorical variables:
+
+```{r}
+# Transform correlation_cat data frame to matrix
+cor_matrix_cat <- correlation_cat %>% column_to_rownames(var = "variable")
+cor_matrix_cat <- data.matrix(cor_matrix_cat)
+
+# Scale regression coefficients from 0 to 1 and order matrix by the decreasing value of Shannon's entropy
+dat <- as.matrix(apply(cor_matrix_cat, MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))))
+dat <- dat[order(dat[,1], decreasing=TRUE),]
+
+# Plot the "correlation" matrix
+corrplot(dat[1:20,], tl.col = "black", tl.srt = 45, col.lim = c(0,1),  title = "Plot of determination coefficients of categorical variables on\n alpha diestiy metrics (top 20 scores ordered by Shannon's entropy)", mar=c(0,0,2,0))
+```
+
+Based on determination coefficients we would expect that country of birth and country of residence impact the alpha diversity (geographical differences could impact lifestyle and diet, also different heritage)
+
+## Random forest - feature importance
+
+Lets try to quantify importance of different categorical variables for each alpha diversity metric:
+
+```{r}
+library(readxl)
+#install.packages("randomForest")
+library(randomForest)
+#install.packages("varImp")
+library(varImp)
+
+data_cat_rf <- all_healthy[ , cat_cols]
+data_cat_rf$sample_id <- NULL
+data_cat_rf$shannon_entropy <- all_healthy$shannon_entropy
+
+# Random Forest Modelling
+#model <- randomForest(shannon_entropy ~ ., data = data_cat_rf, ntree=500) 
+
+# The number of variables selected at each split is denoted by mtry in randomforest function.
+# Let's find the optimal mtry value:
+mtry <- tuneRF(data_cat_rf[,1:178],data_cat_rf$shannon_entropy, ntreeTry=500,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+
+# Now use optimal mtry (the one with minimum bag(OOB) error.) in new model:
+rf <-randomForest(shannon_entropy~., data=data_cat_rf, mtry=best.m, importance=TRUE,ntree=500)
+
+#plot(rf)
+#varImpPlot(rf)
+
+#Conditional=True, adjusts for correlations between predictors.
+i_scores <- caret::varImp(rf, conditional = TRUE) 
+
+#Gathering rownames in 'var'  and converting it to the factor
+#to provide 'fill' parameter for the bar chart. 
+i_scores <- i_scores %>% tibble::rownames_to_column("var") 
+i_scores$var<- i_scores$var %>% as.factor()
+i_scores <- arrange(i_scores, desc(Overall))
+i_scores_plot <- i_scores[1:20,]
+
+#Plotting the bar and polar charts for comparing variables
+i_bar <- i_scores_plot %>% ggplot(aes(x = Overall, y= reorder(var, Overall), fill = var)) + 
+  geom_bar(stat = "identity", show.legend = FALSE, width = 1) + 
+  labs(x = NULL, y = NULL, title = "Feature importance for shannon_entropy")+ 
+  theme_minimal()
+plot(i_bar)
+```
+
+
+```{r}
+######################################################################
+###Try to make a loop to go over all alpha metrics -> still not working
+
+# for (i in 1:length(metric)){
+#   data_cat_rf <- all_healthy[ , cat_cols]
+#   data_cat_rf$sample_id <- NULL
+#   data_cat_rf[[metric[i]]] <- all_healthy[[metric[i]]]
+#   
+#   
+#   # The number of variables selected at each split is denoted by mtry in randomforest function.
+#   # Let's find the optimal mtry value:
+#   mtry <- tuneRF(data_cat_rf[-1], data_cat_rf[[metric[i]]], ntreeTry=500,
+#                  stepFactor=1.5, improve=0.01, trace=TRUE, plot=TRUE)
+#   best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+#   
+#   # Now use optimal mtry (the one with minimum "out of the bag” (OOB) error.) in new model:
+#   rf <-  randomForest(data_cat_rf[[metric[i]]] ~ ., data = data_cat_rf, mtry=best.m, importance=TRUE, ntree=500)
+# 
+#   #Conditional=True, adjusts for correlations between predictors.
+#   i_scores <- caret::varImp(rf, conditional = TRUE) 
+#   
+#   #Gathering rownames in 'var'  and converting it to the factor
+#   #to provide 'fill' parameter for the bar chart. 
+#   i_scores <- i_scores %>% tibble::rownames_to_column("var") 
+#   i_scores$var<- i_scores$var %>% as.factor()
+#   i_scores <- arrange(i_scores, desc(Overall)) %>% filter(var!=metric[i])
+#   i_scores_plot <- i_scores[1:20,]
+#   
+#   #Plotting the bar and polar charts for comparing variables
+#   i_bar <- i_scores_plot %>% ggplot(aes(x = Overall, y= reorder(var, Overall), fill = var)) + 
+#     geom_bar(stat = "identity", show.legend = FALSE, width = 1) + 
+#     labs(x = NULL, y = NULL, title = paste("Feature importance for", metric[i], sep=" "))+ 
+#     theme_minimal()
+#   plot(i_bar)
+# }
+```
+
+## How to compare different meta-data categories in the light of alpha diversity?
+
+In order to take deeper insight into differences in alpha diversity of subsets of population stratified by different categorical variables, please check the interactive Shiny app that makes isualisation of population distributions and applies Mann-Whitney-Wilcoxon test to check whether the stratified groups belong to the same distribution.
+
+```{r, include=FALSE}
+# Doesn't work??
+
+# library(shiny)
+# runApp("06_shiny_app")
+```
+
+
+### Plots for country of birth and residence
+
+Since country of birth and country of residence seem to be highly influential on alpha diversity, lets inspect them more closely. 
+
+Stratifying samples into different countries is not that meaningful. Lets group these countries into continents:
+
+```{r}
+library(stringr)
+
+cols <- c("sample_id", "shannon_entropy", "chao1", "menhinick", "margalef", "fisher_alpha", "gini_index", "pielou_evenness" , "simpson", "strong", "faith_pd","country_of_birth", "country_residence" )
+healthy_countries <- all_healthy[, names(all_healthy) %in% cols]
+
+europe <- c("Albania", "Austria", "Belarus", "Belgium", "Bulgaria", "Croatia", "Czech Republic", "Denmark", "France", "Germany", "Greece", "Gibraltar", "Guernsey", "Hungary", "Ireland", "Italy", "Jersey", "Latvia", "Lithuania", "Moldova, Republic of", "Netherlands", "Norway", "Poland", "Portugal", "Romania", "Russian Federation", "Serbia", "Slovakia", "Spain", "Sweden", "Switzerland", "United Kingdom")
+soutrh_america <- c("Argentina", "Chile", "Brazil", "Bolivia", "Colombia", "Peru", "Trinidad and Tobago", "Venezuela")
+north_america <- c("Canada", "Mexico", "Panama", "United States", "Jamaica")
+asia <- c("Azerbaijan", "China", "Hong Kong", "India", "Iraq", "Iran, Islamic Republic of", "Japan", "Kazakhstan", "Korea, Republic of", "Lebanon", "Malaysia", "Pakistan", "Philippines", "Singapore", "Taiwan, Province of China", "Thailand", "Tunisia", "Turkey", "United Arab Emirates", "Uzbekistan", "Viet Nam", "Bangladesh")
+africa <- c("Ethiopia", "Kenya", "Libyan Arab Jamahiriya", "Morocco", "Nigeria", "South Africa", "Tanzania, United Republic of", "Zambia", "Zimbabwe")
+australia_oceania <- c("Australia", "New Zealand", "Fiji")
+
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% europe, "Europe"))
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% soutrh_america, "South America"))
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% north_america, "North America"))
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% asia, "Asia"))
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% africa, "Africa"))
+healthy_countries$country_of_birth <- sapply(healthy_countries$country_of_birth, function(x) replace(x, x %in% australia_oceania, "Australia and Oceania"))
+
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% europe, "Europe"))
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% soutrh_america, "South America"))
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% north_america, "North America"))
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% asia, "Asia"))
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% africa, "Africa"))
+healthy_countries$country_residence <- sapply(healthy_countries$country_residence, function(x) replace(x, x %in% australia_oceania, "Australia and Oceania"))
+
+table(healthy_countries$country_of_birth)
+table(healthy_countries$country_residence)
+```
+
+For country of birth: there are only 12 samples from Africa and 16 from South America, and only 23 samples from Australia and Oceania.
+For country of residence: 2 samples from Africa, 11 samples from Asia, 3 samples from Australia and Oceania, 1 sample from South America and 183 Unspecidfied sample.
+
+Lets filter those continental groups out:
+
+```{r}
+#delete underrepresented values
+
+healthy_countries_2 <- healthy_countries[!(healthy_countries$country_of_birth=="Africa" | healthy_countries$country_of_birth=="Australia and Oceania" | healthy_countries$country_of_birth=="South America" | healthy_countries$country_residence=="Africa" | healthy_countries$country_residence=="Australia and Oceania" | healthy_countries$country_residence=="Asia" | healthy_countries$country_residence=="South America" | healthy_countries$country_residence=="Unspecified"),]
+
+table(healthy_countries_2$country_of_birth)
+table(healthy_countries_2$country_residence)
+```
+
+Now we are left with samples which country of birth is located in Asia, Europe or North America, and which country of residence is in Europe or North America. Lets see if there is a difference between these groups:
+
+```{r}
+compare <- c("country_of_birth", "country_residence")
+violin <- vector('list', length(metric)* length(compare))
+
+for (j in 1:length(compare)){
+  for (i in 1:length(metric)){
+    mean_line <- healthy_countries_2 %>% dplyr::group_by(.data[[compare[j]]]) %>% dplyr::summarise(grp_mean=mean(.data[[metric[i]]]))
+    plot_data <- healthy_countries_2 %>% dplyr::group_by(.data[[compare[j]]]) %>% dplyr::mutate(m = mean(.data[[metric[i]]])) 
+  
+    violin[[j]][[i]] <- plot_data %>% ggplot(aes(x = .data[[metric[i]]], y = reorder(.data[[compare[j]]], -m), color = .data[[compare[j]]], fill = .data[[compare[j]]])) +
+      geom_violin()+
+      geom_boxplot(width=0.1, color="grey", alpha=0.2) +
+      geom_vline(data = mean_line, aes(xintercept = grp_mean, color = .data[[compare[j]]]), linetype = "dashed")+ 
+      xlab(label_fun(metric[i])) +
+      ylab("")+
+      #ggtitle("A Violin plot of distributions of alpha metrics in different conditions")+
+      scale_y_discrete(labels = function(x) str_wrap(x, width = 7))+
+      theme(legend.position="none") 
+
+  }
+}
+
+# Show plots for country of birth
+grid.arrange(violin[[1]][[1]], violin[[1]][[2]],violin[[1]][[3]], violin[[1]][[4]],violin[[1]][[5]], violin[[1]][[6]],violin[[1]][[7]], violin[[1]][[8]],violin[[1]][[9]], violin[[1]][[10]], ncol=4)
+```
+
+For all alpha diversity metrics (except from Gini and Strong's index) Europe has the highest mean value while Asia has the lowest (also the lowest sample size).
+
+```{r}
+# Show plots for country of birth
+grid.arrange(violin[[2]][[1]], violin[[2]][[2]],violin[[2]][[3]], violin[[2]][[4]],violin[[2]][[5]], violin[[2]][[6]],violin[[2]][[7]], violin[[2]][[8]],violin[[2]][[9]], violin[[2]][[10]], ncol=4) 
+```
+
+For all alpha diversity metrics (except from Gini and Strong's index) Europe has higher mean value than North America.
+
+```{r}
+test <- list()
+tables <- list()
+
+for (j in 1:length(compare)){
+  for (i in 1:length(metric)){
+    test[[i]] <- pairwise.wilcox.test(healthy_countries_2[[metric[i]]], healthy_countries_2[[compare[j]]], p.adjust.method="none") %>% 
+    broom::tidy() %>% add_column(parameter = metric[i], .before='group1')
+  }
+  
+  tables[[j]] <- do.call(what = rbind, args = test)
+  
+  tables[[j]] <- tables[[j]] %>% 
+    add_column(p.adjusted = p.adjust(tables[[j]]$p.value, "fdr"), .after='p.value') %>% 
+    arrange(p.value, group1)  %>%
+    flextable() %>% 
+    bold(~ p.value < 0.05, 4) %>%
+    bold(~ p.adjusted < 0.05, 5) %>%
+    add_header_lines(values = "Results of the Wilcox test for distributions of different groups")
+}
+
+tables
+```
+
+Mann-Whitney-Wilcoxon test shows that, when it comes to different countries of birth, there is significant difference (sign. lvl. 0,05) between samples from:
+*Europe and Asia - for all alpha metrics (Simpson's index is on the border of signifficance)
+*Europe and North America - for Faith's, Menhinick's, Margalef's, Fisher's and Chao1 alpha diversity index.
+
+Furthermore, for different countries of residence, there is significant difference (sign. lvl. 0,05) between samples from:
+*Europe and North America - for Faith's, Menhinick's, Margalef's, Fisher's, Chao1 and Gini's alpha diversity index.
+
+This can indicate that American healthy population is probably not gooing to be equated with european (Spanish) population. 
+
+
+# Session information
+
+```{r}
+sessionInfo()
+```
