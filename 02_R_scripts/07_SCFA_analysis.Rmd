@@ -121,10 +121,14 @@ Plot:
 
 ```{r}
 #PLOT GENERA VS SCFAs
-plot_genera_BH <- corrplot(matrix_genera_BH, method="circle", type="full", col = COL2(c("RdBu")), tl.col = "black", tl.srt = 45, tl.cex = 1.5,cl.cex = 1.5, p.mat = data.matrix(p_BH), insig = "blank", sig.level = 0.01)
+#Open the JPEG device with high resolution
+jpeg(filename = "genera_corrplot.jpg", width = 4000, height = 2000, res = 900)
 
-dev.copy(jpeg,filename="genera_corrplot.jpg")
-dev.off ()
+#Generate the corrplot directly inside the device
+corrplot(matrix_genera_BH, method = "circle", type = "full", col = COL2(c("RdBu")), tl.col = "black", tl.srt = 45, tl.cex = 1, p.mat = data.matrix(p_BH), insig = "blank", sig.level = 0.01)
+
+#Close the graphics device
+dev.off()
 ```
 
 ## Diversity indexes vs SCFAs
@@ -209,8 +213,12 @@ colnames(p_BH) <- c("Shannon entropy", "Chao1", "Fisher alpha", "Margalef", "Gin
 rownames(p_BH) <- c('Acetate', 'Propionate', 'Butyrate')
 
 #PLOT ALPHA-DIVERSITY VS SCFAs
+#Open the JPEG device with high resolution
+jpeg(filename = "diversity_corrplot.jpg", width = 4800, height = 2000, res = 900)
+
+#Generate the corrplot directly inside the device
 plot_diversity_BH <- corrplot(matrix_diversity_BH, method="circle", type="full", col = COL2(c("RdBu")), tl.col = "black", tl.srt = 45, tl.cex = 1, p.mat = data.matrix(p_BH), insig = "blank", sig.level = 0.01)
 
-dev.copy(jpeg,filename="diversity_corrplot.jpg")
-dev.off ()
+#Close the graphics device
+dev.off()
 ```
