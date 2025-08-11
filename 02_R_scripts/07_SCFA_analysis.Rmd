@@ -175,7 +175,7 @@ corr = matrix_diversity[ind, ind]
 p = p_value_bh[ind, ind]
 
 #Now we filtrate the results: first the columns of interest and then according to p values 
-corr_diversity <- as.matrix(corr[, c(1:3)], corr[, c(4:81)])
+corr_diversity <- as.matrix(corr[, c(1:3)], corr[, c(4:13)])
 
 #We delate first rows (they are the SCFAs ans we don't need them), to have the same length
 corr_diversity <- corr_diversity[-(1:3),]
