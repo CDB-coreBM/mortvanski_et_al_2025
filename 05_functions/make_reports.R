@@ -17,11 +17,12 @@ report <- function(file, n_file = "", open_file = default_open_file,
 
   ### Set the name of the report file ###
   base_name <- sub(pattern = ".Rmd", replacement = "", x = basename(file))
+  clean_base_name <- sub(pattern = "^[0-9]+[_-]", replacement = "", x = base_name)
 
   # Make nfiles with always 2 digits
   n_file <- ifelse(as.integer(n_file) < 10, paste0("0", n_file), n_file)
 
-  file_name <- paste0(n_file, "-", base_name, ".html")
+  file_name <- paste0(n_file, "-", clean_base_name, ".html")
 
   ### Render ###
   render(
