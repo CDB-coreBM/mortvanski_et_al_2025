@@ -2,7 +2,7 @@
 
 Based on the original work done by Natasa Mortvanski for her Master project in 2023 (MSc Bioinformatics for Health Sciences 2021/2023) 
 
-**Title of the publication:** The Clinical Value of Alpha-diversity metrics to establish Dysbiosis in Microbiome Studies
+**Title of the publication:** The Clinical Value of Alpha-diversity metrics to establish Gut Dysbiosis in Microbiome Studies
 
 
 This is a repository containing the R project with the following directories: 
